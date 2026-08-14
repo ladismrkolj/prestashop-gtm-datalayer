@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1
+
+- Fix: the Head/Body snippet fields were double HTML-escaped when the Back
+  Office config screen re-rendered them (PrestaShop's admin Smarty already
+  escapes `HelperForm` field values once; the module was escaping them a
+  second time on top of that). Snippets now display exactly as saved. The
+  storefront injection itself (which reads `Configuration::get()` directly,
+  bypassing the admin display code) was never affected by this bug - but if
+  you saved the settings form while the garbled text was showing, re-paste
+  the snippet and save once more to clear out the corrupted stored value.
+
 ## 1.0.0
 
 Initial release.

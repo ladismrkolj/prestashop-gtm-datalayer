@@ -100,7 +100,7 @@ class Ps_ga4_datalayer extends Module
     {
         $this->name = 'ps_ga4_datalayer';
         $this->tab = 'analytics_stats';
-        $this->version = '1.0.0';
+        $this->version = '1.0.1';
         $this->author = 'ladismrkolj';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -366,13 +366,23 @@ class Ps_ga4_datalayer extends Module
         ];
     }
 
-    /** @return array<string, mixed> */
+    /**
+     * NOTE: values are returned raw, un-escaped. PrestaShop's admin Smarty
+     * instance runs with `escape_html = true`, so every `{$fields_value...}`
+     * output in HelperForm's own templates is already HTML-escaped once by
+     * the framework - escaping it again here would double-encode it (e.g.
+     * `<script>` -> `&lt;script&gt;` -> `&amp;lt;script&amp;gt;`, which then
+     * renders back as the literal text `&lt;script&gt;` inside the
+     * textarea instead of the real snippet).
+     *
+     * @return array<string, mixed>
+     */
     private function getConfigFieldsValues(): array
     {
         return [
             self::CONFIG_ENABLE_INJECTION => $this->configBool(self::CONFIG_ENABLE_INJECTION),
-            self::CONFIG_HEAD_SNIPPET => Tools::htmlentitiesUTF8((string) Configuration::get(self::CONFIG_HEAD_SNIPPET)),
-            self::CONFIG_BODY_SNIPPET => Tools::htmlentitiesUTF8((string) Configuration::get(self::CONFIG_BODY_SNIPPET)),
+            self::CONFIG_HEAD_SNIPPET => (string) Configuration::get(self::CONFIG_HEAD_SNIPPET),
+            self::CONFIG_BODY_SNIPPET => (string) Configuration::get(self::CONFIG_BODY_SNIPPET),
             self::CONFIG_TRACK_PROMOTIONS => $this->configBool(self::CONFIG_TRACK_PROMOTIONS),
             self::CONFIG_TRACK_ENGAGEMENT => $this->configBool(self::CONFIG_TRACK_ENGAGEMENT),
             self::CONFIG_MP_MEASUREMENT_ID => (string) Configuration::get(self::CONFIG_MP_MEASUREMENT_ID),
