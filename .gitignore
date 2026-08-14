@@ -1,0 +1,4 @@
+/ps_ga4_datalayer/vendor/
+composer.lock
+.DS_Store
+*.log
