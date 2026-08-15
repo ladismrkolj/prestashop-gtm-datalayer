@@ -445,33 +445,115 @@
      *  add_to_wishlist
      * ------------------------------------------------------------------ */
 
-    function initWishlist() {
+    function pushAddToWishlist(idProduct, overrides) {
+        var item = resolveItem(idProduct, overrides);
+
+        push('add_to_wishlist', {
+            ecommerce: {
+                currency: currency(),
+                value: toFloat(item.price),
+                items: [item],
+            },
+        });
+    }
+
+    /**
+     * Preferred path for PrestaShop's official `blockwishlist` module.
+     *
+     * That module is Vue-based and exposes its internal event bus as
+     * `window.WishlistEventBus`, announcing readiness by emitting
+     * `wishlistEventBusInit` on the PrestaShop bus. Its `addedToWishlist`
+     * event is the only *truthful* signal available: a raw click on the
+     * heart is not an add, because
+     *   - a logged-out visitor gets the login modal instead;
+     *   - a logged-in visitor first picks a list in a modal, and may cancel;
+     *   - clicking an already-filled heart REMOVES the product.
+     * Tracking clicks would over-count all three cases.
+     */
+    function initWishlistEventBus() {
+        var subscribed = false;
+
+        var subscribe = function () {
+            if (subscribed || !window.WishlistEventBus || typeof window.WishlistEventBus.$on !== 'function') {
+                return;
+            }
+            subscribed = true;
+
+            window.WishlistEventBus.$on('addedToWishlist', function (event) {
+                var detail = (event && event.detail) || {};
+                if (!detail.productId) {
+                    return;
+                }
+                pushAddToWishlist(detail.productId);
+            });
+        };
+
+        if (window.prestashop && typeof window.prestashop.on === 'function') {
+            window.prestashop.on('wishlistEventBusInit', subscribe);
+        }
+
+        // The bus may already exist if this file executes after the module's
+        // own bundle (asset order isn't guaranteed), so try immediately and
+        // then a few times while the Vue apps mount.
+        subscribe();
+        var attempts = 0;
+        var poll = window.setInterval(function () {
+            attempts += 1;
+            subscribe();
+            if (subscribed || attempts >= 20) {
+                window.clearInterval(poll);
+            }
+        }, 250);
+
+        return function () {
+            return subscribed;
+        };
+    }
+
+    /**
+     * Fallback for themes/modules that render a plain wishlist link instead
+     * of blockwishlist's Vue button. Skipped entirely once the official bus
+     * is wired up, so the two can never double-count.
+     */
+    function initWishlistClickFallback(isBusActive) {
         document.addEventListener(
             'click',
             function (event) {
+                if (isBusActive()) {
+                    return;
+                }
+
                 var button = closest(event.target, SELECTORS.wishlistButton);
                 if (!button) {
                     return;
                 }
 
-                var productContainer = button.hasAttribute('data-id-product') ? button : closest(button, '[data-id-product]');
-                var idProduct = productContainer ? productContainer.getAttribute('data-id-product') : null;
+                // blockwishlist uses data-product-id; other modules and
+                // product miniatures use data-id-product. Accept both, on
+                // the element itself or any ancestor, and fall back to the
+                // current product page.
+                var idProduct =
+                    attrFrom(button, 'data-product-id') ||
+                    attrFrom(button, 'data-id-product') ||
+                    moduleConfig.currentProductId;
+
                 if (!idProduct) {
                     return;
                 }
 
-                var item = resolveItem(idProduct);
-
-                push('add_to_wishlist', {
-                    ecommerce: {
-                        currency: currency(),
-                        value: toFloat(item.price),
-                        items: [item],
-                    },
-                });
+                pushAddToWishlist(idProduct);
             },
             true
         );
+    }
+
+    function attrFrom(el, attribute) {
+        if (el && el.hasAttribute && el.hasAttribute(attribute)) {
+            return el.getAttribute(attribute);
+        }
+        var holder = closest(el, '[' + attribute + ']');
+
+        return holder ? holder.getAttribute(attribute) : null;
     }
 
     /* ------------------------------------------------------------------ *
@@ -667,7 +749,7 @@
         initVariantChange();
         initShippingInfo();
         initPaymentInfo();
-        initWishlist();
+        initWishlistClickFallback(initWishlistEventBus());
         initShare();
         initPromotions();
         initVoucher();

@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.4
+
+- Fix: `add_to_wishlist` never fired with PrestaShop's official
+  `blockwishlist` module. The handler looked for a `data-id-product`
+  attribute, but that module renders `data-product-id` (note the word
+  order) on its `.wishlist-button` wrapper, so the handler bailed out
+  before pushing anything.
+- Improvement: wishlist tracking now subscribes to `blockwishlist`'s own
+  Vue event bus, which it exposes as `window.WishlistEventBus` after
+  emitting `wishlistEventBusInit` on the PrestaShop bus. Its
+  `addedToWishlist` event is the only truthful signal - a raw click on the
+  heart is not an add, because a logged-out visitor gets the login modal,
+  a logged-in visitor can still cancel the list-picker modal, and clicking
+  an already-filled heart *removes* the product. The previous click-based
+  approach would have over-counted all three.
+- The click handler is retained as a fallback for themes/modules that
+  render a plain wishlist link, and now accepts `data-product-id`,
+  `data-id-product` (on the element or any ancestor) or the current product
+  page id. It disables itself when the official bus is active, so the two
+  paths can never double-count.
+- Adds `tests/wishlist-datalayer-test.js` (run in CI), which reproduces
+  `blockwishlist`'s real markup and event contract and asserts both that a
+  confirmed add fires exactly once and that a bare click does not.
+
 ## 1.0.3
 
 - Fix: push `{ecommerce: null}` before every ecommerce event, as Google's

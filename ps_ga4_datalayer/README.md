@@ -75,7 +75,7 @@ exactly as pasted either way.
 
 | # | Event | Trigger |
 |---|---|---|
-| 13 | `add_to_wishlist` | Click on a wishlist heart icon |
+| 13 | `add_to_wishlist` | Confirmed add via `blockwishlist`'s `addedToWishlist` event (falls back to click for other wishlist modules) |
 | 14 | `refund` | `hookActionOrderSlipAdd` (credit slip), sent server-to-server via GA4 Measurement Protocol |
 | 15 | `view_item_variants` | `prestashop.on('updateProduct'/'updatedProduct')` on combination change |
 

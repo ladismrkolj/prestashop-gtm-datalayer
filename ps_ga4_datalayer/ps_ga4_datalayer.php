@@ -100,7 +100,7 @@ class Ps_ga4_datalayer extends Module
     {
         $this->name = 'ps_ga4_datalayer';
         $this->tab = 'analytics_stats';
-        $this->version = '1.0.3';
+        $this->version = '1.0.4';
         $this->author = 'ladismrkolj';
         $this->need_instance = 0;
         $this->bootstrap = true;
