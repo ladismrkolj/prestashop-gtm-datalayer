@@ -36,3 +36,6 @@ jobs:
           node-version: '20'
       - name: Syntax-check front.js
         run: node --check ps_ga4_datalayer/views/js/front.js
+
+      - name: add_to_wishlist dataLayer test
+        run: node tests/wishlist-datalayer-test.js
