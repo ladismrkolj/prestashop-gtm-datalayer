@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.3
+
+- Fix: push `{ecommerce: null}` before every ecommerce event, as Google's
+  GA4 documentation requires. GTM's data layer *merges* successive pushes
+  instead of replacing them, so without this the `items` array from an
+  earlier event survived into a later one - a category page pushing
+  `view_item_list` with 12 items followed by a `select_item` with 1 item
+  left GTM reading 12. That silently inflated item counts and, on
+  `purchase`, revenue. Applied in `header.tpl`, `purchase.tpl` and
+  `front.js`.
+- Adds `tests/datalayer-ecommerce-clear-test.php` (run in CI), which checks
+  the clear is present and correctly placed, and models GTM's recursive
+  index-wise merge to prove the clear actually stops the item bleed.
+
 ## 1.0.2
 
 **Critical fix: the storefront rendered as a completely blank page** (empty
