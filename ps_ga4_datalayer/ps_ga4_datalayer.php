@@ -100,7 +100,7 @@ class Ps_ga4_datalayer extends Module
     {
         $this->name = 'ps_ga4_datalayer';
         $this->tab = 'analytics_stats';
-        $this->version = '1.0.0';
+        $this->version = '1.0.2';
         $this->author = 'ladismrkolj';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -366,13 +366,23 @@ class Ps_ga4_datalayer extends Module
         ];
     }
 
-    /** @return array<string, mixed> */
+    /**
+     * NOTE: values are returned raw, un-escaped. PrestaShop's admin Smarty
+     * instance runs with `escape_html = true`, so every `{$fields_value...}`
+     * output in HelperForm's own templates is already HTML-escaped once by
+     * the framework - escaping it again here would double-encode it (e.g.
+     * `<script>` -> `&lt;script&gt;` -> `&amp;lt;script&amp;gt;`, which then
+     * renders back as the literal text `&lt;script&gt;` inside the
+     * textarea instead of the real snippet).
+     *
+     * @return array<string, mixed>
+     */
     private function getConfigFieldsValues(): array
     {
         return [
             self::CONFIG_ENABLE_INJECTION => $this->configBool(self::CONFIG_ENABLE_INJECTION),
-            self::CONFIG_HEAD_SNIPPET => Tools::htmlentitiesUTF8((string) Configuration::get(self::CONFIG_HEAD_SNIPPET)),
-            self::CONFIG_BODY_SNIPPET => Tools::htmlentitiesUTF8((string) Configuration::get(self::CONFIG_BODY_SNIPPET)),
+            self::CONFIG_HEAD_SNIPPET => (string) Configuration::get(self::CONFIG_HEAD_SNIPPET),
+            self::CONFIG_BODY_SNIPPET => (string) Configuration::get(self::CONFIG_BODY_SNIPPET),
             self::CONFIG_TRACK_PROMOTIONS => $this->configBool(self::CONFIG_TRACK_PROMOTIONS),
             self::CONFIG_TRACK_ENGAGEMENT => $this->configBool(self::CONFIG_TRACK_ENGAGEMENT),
             self::CONFIG_MP_MEASUREMENT_ID => (string) Configuration::get(self::CONFIG_MP_MEASUREMENT_ID),
@@ -390,6 +400,11 @@ class Ps_ga4_datalayer extends Module
      * ================================================================== */
 
     public function hookActionFrontControllerSetMedia(array $params = []): void
+    {
+        $this->safely(fn () => $this->doActionFrontControllerSetMedia(), 'hookActionFrontControllerSetMedia');
+    }
+
+    private function doActionFrontControllerSetMedia(): void
     {
         $controller = $this->context->controller;
 
@@ -435,6 +450,11 @@ class Ps_ga4_datalayer extends Module
 
     public function hookDisplayHeader(array $params = []): string
     {
+        return $this->safelyRender(fn (): string => $this->doDisplayHeader(), 'hookDisplayHeader');
+    }
+
+    private function doDisplayHeader(): string
+    {
         $events = $this->buildPageLoadEvents();
 
         // The same items just used for view_item_list / view_item are also
@@ -454,6 +474,11 @@ class Ps_ga4_datalayer extends Module
     }
 
     public function hookDisplayAfterBodyOpeningTag(array $params = []): string
+    {
+        return $this->safelyRender(fn (): string => $this->doDisplayAfterBodyOpeningTag(), 'hookDisplayAfterBodyOpeningTag');
+    }
+
+    private function doDisplayAfterBodyOpeningTag(): string
     {
         if (!$this->configBool(self::CONFIG_ENABLE_INJECTION)) {
             return '';
@@ -708,6 +733,11 @@ class Ps_ga4_datalayer extends Module
 
     public function hookDisplayOrderConfirmation(array $params = []): string
     {
+        return $this->safelyRender(fn (): string => $this->doDisplayOrderConfirmation($params), 'hookDisplayOrderConfirmation');
+    }
+
+    private function doDisplayOrderConfirmation(array $params): string
+    {
         $order = $params['order'] ?? $params['objOrder'] ?? null;
         if (!($order instanceof Order) || !$order->id) {
             return '';
@@ -744,25 +774,29 @@ class Ps_ga4_datalayer extends Module
 
     public function hookActionAuthentication(array $params = []): void
     {
-        if (!$this->configBool(self::CONFIG_TRACK_ENGAGEMENT) || $this->signupJustHappened) {
-            return;
-        }
+        $this->safely(function (): void {
+            if (!$this->configBool(self::CONFIG_TRACK_ENGAGEMENT) || $this->signupJustHappened) {
+                return;
+            }
 
-        $this->context->cookie->{self::COOKIE_LOGIN_PENDING} = 1;
-        $this->context->cookie->write();
+            $this->context->cookie->{self::COOKIE_LOGIN_PENDING} = 1;
+            $this->context->cookie->write();
+        }, 'hookActionAuthentication');
     }
 
     public function hookActionCustomerAccountAdd(array $params = []): void
     {
-        $this->signupJustHappened = true;
+        $this->safely(function (): void {
+            $this->signupJustHappened = true;
 
-        if (!$this->configBool(self::CONFIG_TRACK_ENGAGEMENT)) {
-            return;
-        }
+            if (!$this->configBool(self::CONFIG_TRACK_ENGAGEMENT)) {
+                return;
+            }
 
-        $this->context->cookie->{self::COOKIE_SIGNUP_PENDING} = 1;
-        $this->context->cookie->{self::COOKIE_LOGIN_PENDING} = 0;
-        $this->context->cookie->write();
+            $this->context->cookie->{self::COOKIE_SIGNUP_PENDING} = 1;
+            $this->context->cookie->{self::COOKIE_LOGIN_PENDING} = 0;
+            $this->context->cookie->write();
+        }, 'hookActionCustomerAccountAdd');
     }
 
     /* ==================================================================
@@ -770,6 +804,11 @@ class Ps_ga4_datalayer extends Module
      * ================================================================== */
 
     public function hookActionOrderSlipAdd(array $params = []): void
+    {
+        $this->safely(fn () => $this->doActionOrderSlipAdd($params), 'hookActionOrderSlipAdd');
+    }
+
+    private function doActionOrderSlipAdd(array $params): void
     {
         $order = $params['order'] ?? null;
         if (!($order instanceof Order) || !$order->id) {
@@ -793,17 +832,39 @@ class Ps_ga4_datalayer extends Module
     }
 
     /**
+     * PrestaShop 9 core (src/Adapter/Order/Refund/OrderSlipCreator.php)
+     * dispatches this hook with both `qtyList` (a ready-made
+     * id_order_detail => quantity map) and `productList` (the fuller refund
+     * rows, each carrying a `quantity` key). `qtyList` is preferred; the
+     * `productList` walk stays as a fallback for other code paths and
+     * third-party modules that fire this hook with only that key.
+     *
      * @param array<string, mixed> $params
      * @return array<int, int> id_order_detail => refunded quantity
      */
     private function extractSlipQuantities(array $params): array
     {
-        $productList = $params['productList'] ?? $params['product_list'] ?? [];
         $qtyList = [];
+
+        $directQtyList = $params['qtyList'] ?? null;
+        if (is_array($directQtyList)) {
+            foreach ($directQtyList as $idOrderDetail => $qty) {
+                $qty = (int) $qty;
+                if ($qty > 0) {
+                    $qtyList[(int) $idOrderDetail] = $qty;
+                }
+            }
+        }
+
+        if ($qtyList !== []) {
+            return $qtyList;
+        }
+
+        $productList = $params['productList'] ?? $params['product_list'] ?? [];
 
         foreach ((array) $productList as $idOrderDetail => $row) {
             if (is_array($row)) {
-                $qty = $row['amount'] ?? $row['quantity'] ?? $row['product_quantity'] ?? 0;
+                $qty = $row['quantity'] ?? $row['amount'] ?? $row['product_quantity'] ?? 0;
             } else {
                 $qty = $row;
             }
@@ -930,6 +991,43 @@ class Ps_ga4_datalayer extends Module
      * ================================================================== */
 
     /**
+     * Runs a hook body, swallowing (and logging) any Throwable.
+     *
+     * Analytics is strictly non-essential to serving a page: a bug in this
+     * module - or an unexpected data shape handed to it by the theme, core,
+     * or another module - must never take the storefront down. Because
+     * PrestaShop renders inside an output buffer, an uncaught Error thrown
+     * from a hook discards the buffer and the visitor gets a blank page
+     * with empty source rather than a readable error. Catching Throwable
+     * (not just Exception) at every hook boundary is what keeps a broken
+     * dataLayer merely a broken dataLayer.
+     */
+    private function safely(callable $callback, string $context): void
+    {
+        try {
+            $callback();
+        } catch (Throwable $e) {
+            $this->logWarning($context, $e);
+        }
+    }
+
+    /**
+     * Same guarantee as {@see self::safely()}, for hooks that must return
+     * markup: on failure the hook contributes an empty string, so the page
+     * renders normally minus this module's snippet.
+     */
+    private function safelyRender(callable $callback, string $context): string
+    {
+        try {
+            return (string) $callback();
+        } catch (Throwable $e) {
+            $this->logWarning($context, $e);
+
+            return '';
+        }
+    }
+
+    /**
      * Base64-encodes a JSON payload for safe embedding inside an inline
      * <script> tag, decoded client-side with `JSON.parse(atob(...))`. The
      * base64 alphabet cannot contain `<`, `/`, quotes or backslashes, so -
@@ -939,7 +1037,14 @@ class Ps_ga4_datalayer extends Module
      */
     private function jsonToBase64(mixed $data): string
     {
-        return base64_encode((string) Tools::jsonEncode($data));
+        // NOTE: plain json_encode(), not Tools::jsonEncode() - the latter
+        // existed in older PrestaShop branches but was removed and does NOT
+        // exist in PrestaShop 9. Calling it is a fatal Error, not a
+        // catchable Exception, and since this runs on every page load it
+        // blanks the entire storefront.
+        $json = json_encode($data, JSON_UNESCAPED_UNICODE);
+
+        return base64_encode($json === false ? 'null' : $json);
     }
 
     private function getFormatter(): GA4DataLayerFormatter
@@ -951,17 +1056,28 @@ class Ps_ga4_datalayer extends Module
         return $this->formatter;
     }
 
+    /**
+     * Logging is itself a database write and can therefore fail (DB down,
+     * table locked, logger misconfigured). Since this runs *inside* the
+     * catch blocks that keep the storefront alive, it must never be the
+     * thing that throws - hence the nested try/catch swallowing everything.
+     */
     private function logWarning(string $context, Throwable $e): void
     {
-        if (class_exists(PrestaShopLogger::class)) {
-            PrestaShopLogger::addLog(
-                sprintf('[%s] %s - %s', $this->name, $context, $e->getMessage()),
-                2,
-                null,
-                'Ps_ga4_datalayer',
-                0,
-                true
-            );
+        try {
+            if (class_exists(PrestaShopLogger::class)) {
+                PrestaShopLogger::addLog(
+                    sprintf('[%s] %s - %s', $this->name, $context, $e->getMessage()),
+                    2,
+                    null,
+                    'Ps_ga4_datalayer',
+                    0,
+                    true
+                );
+            }
+        } catch (Throwable $loggingFailure) {
+            // Deliberately empty: nothing useful can be done here, and
+            // rethrowing would blank the page this class exists to protect.
         }
     }
 }

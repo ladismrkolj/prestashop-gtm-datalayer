@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.0.2
+
+**Critical fix: the storefront rendered as a completely blank page** (empty
+page source) on every page, whether or not snippet injection was enabled.
+
+- Fix: `Tools::jsonEncode()` does not exist in PrestaShop 9 (it was removed
+  in the 1.7 -> 9 cleanup). It was called from `hookDisplayHeader`, i.e. on
+  every single page load. Calling an undefined static method is a fatal
+  `Error`, and since PrestaShop renders inside an output buffer, the buffer
+  was discarded and the visitor got a blank page with empty source. Now
+  uses plain `json_encode()`.
+- Fix: `Tools::isEmptyOrNull()` also does not exist in PrestaShop 9. It was
+  called from `GA4DataLayerFormatter::variantLabel()`, so any product page,
+  cart or order involving a combination hit the same fatal. Now checks the
+  `ObjectModel`'s `id` instead.
+- Hardening: every hook is now wrapped in a `Throwable` guard. Analytics is
+  never worth taking a shop offline for - a failure now degrades to "no
+  dataLayer for this request", logged, with the page rendering normally.
+  The loggers themselves are guarded too, since logging is a DB write that
+  can fail.
+- Hardening: rows coming back from `Cart::getProducts()` /
+  `Order::getProducts()` are validated before use, so an unexpected shape
+  from another module can't cause a `TypeError` under `strict_types=1`.
+- Adds `tests/hook-smoke-test.php`, run in CI: it invokes every hook across
+  every page type (plus malformed data) and fails if anything throws, gets
+  silently swallowed, or if `displayHeader` stops emitting markup. Both
+  bugs above were verified to be caught by it.
+
+## 1.0.1
+
+- Fix: the Head/Body snippet fields were double HTML-escaped when the Back
+  Office config screen re-rendered them (PrestaShop's admin Smarty already
+  escapes `HelperForm` field values once; the module was escaping them a
+  second time on top of that). Snippets now display exactly as saved. The
+  storefront injection itself (which reads `Configuration::get()` directly,
+  bypassing the admin display code) was never affected by this bug - but if
+  you saved the settings form while the garbled text was showing, re-paste
+  the snippet and save once more to clear out the corrupted stored value.
+
 ## 1.0.0
 
 Initial release.

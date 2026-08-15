@@ -18,6 +18,12 @@ jobs:
       - name: Syntax-check all PHP files
         run: find ps_ga4_datalayer -name '*.php' -print0 | xargs -0 -n1 php -l
 
+      # php -l cannot catch calls to methods that don't exist in PrestaShop
+      # 9 - those are runtime fatals that blank the storefront. This runs
+      # every hook against stubs to catch exactly that.
+      - name: Hook smoke test (no fatals, no swallowed errors)
+        run: php tests/hook-smoke-test.php
+
   js-lint:
     runs-on: ubuntu-latest
     steps:

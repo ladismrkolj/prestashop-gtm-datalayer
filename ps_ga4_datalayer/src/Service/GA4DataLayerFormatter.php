@@ -215,7 +215,15 @@ final class GA4DataLayerFormatter
             $rows = [];
         }
 
+        if (!is_array($rows)) {
+            $rows = [];
+        }
+
         foreach (array_values($rows) as $index => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
             $qty = (int) $this->pick($row, ['cart_quantity', 'quantity'], 1);
             $price = $this->toFloat($this->pick($row, ['price_wt', 'total_wt', 'price'], 0));
 
@@ -251,7 +259,15 @@ final class GA4DataLayerFormatter
             $rows = [];
         }
 
+        if (!is_array($rows)) {
+            $rows = [];
+        }
+
         foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
             $idProduct = (int) $this->pick($row, ['product_id', 'id_product'], 0);
             $idProductAttribute = (int) $this->pick($row, ['product_attribute_id', 'id_product_attribute'], 0);
             $unitPrice = $this->toFloat($this->pick($row, ['unit_price_tax_incl', 'total_price_tax_incl'], 0));
@@ -336,7 +352,15 @@ final class GA4DataLayerFormatter
             $rows = [];
         }
 
+        if (!is_array($rows)) {
+            $rows = [];
+        }
+
         foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
             $idOrderDetail = (int) $this->pick($row, ['id_order_detail'], 0);
             if (!isset($qtyList[$idOrderDetail]) || (int) $qtyList[$idOrderDetail] <= 0) {
                 continue;
@@ -377,11 +401,15 @@ final class GA4DataLayerFormatter
         $idLang = $idLang ?? (int) $this->context->language->id;
 
         try {
+            // NOTE: check `->id`, not Tools::isEmptyOrNull() - that helper
+            // does NOT exist in PrestaShop 9 and calling it is a fatal
+            // Error. An ObjectModel constructed with an unknown id simply
+            // comes back with a null id, which is what's checked here.
             $combination = new Combination($idProductAttribute);
-            if (!Tools::isEmptyOrNull($combination) && (int) $combination->id_product === $idProduct) {
+            if ((int) $combination->id > 0 && (int) $combination->id_product === $idProduct) {
                 $pairs = [];
-                foreach ($combination->getAttributesName($idLang) as $attribute) {
-                    if (!empty($attribute['name'])) {
+                foreach ((array) $combination->getAttributesName($idLang) as $attribute) {
+                    if (is_array($attribute) && !empty($attribute['name'])) {
                         $pairs[] = (string) $attribute['name'];
                     }
                 }
@@ -523,11 +551,23 @@ final class GA4DataLayerFormatter
     }
 
     /**
-     * @param array<string, mixed> $row
+     * $row is deliberately untyped (`mixed`, not `array`): core methods
+     * like `Cart::getProducts()`/`Order::getProducts()` are documented to
+     * return arrays of arrays, but a theme/module hook can reshape a row
+     * (or a row can be missing/false) in ways this class has no control
+     * over. Under `strict_types=1`, handing anything but an array to an
+     * `array`-typed parameter throws an uncaught TypeError - which, given
+     * PrestaShop's output buffering, blanks the entire page. Accepting
+     * `mixed` here and failing soft is what actually prevents that.
+     *
      * @param array<int, string> $keys
      */
-    private function pick(array $row, array $keys, mixed $default = null): mixed
+    private function pick(mixed $row, array $keys, mixed $default = null): mixed
     {
+        if (!is_array($row)) {
+            return $default;
+        }
+
         foreach ($keys as $key) {
             if (array_key_exists($key, $row) && $row[$key] !== null && $row[$key] !== '') {
                 return $row[$key];
@@ -537,17 +577,25 @@ final class GA4DataLayerFormatter
         return $default;
     }
 
+    /**
+     * Logging is itself a database write and can fail. Since it runs inside
+     * this class's catch blocks, it must never throw on its own.
+     */
     private function logWarning(string $context, Throwable $e): void
     {
-        if (class_exists(PrestaShopLogger::class)) {
-            PrestaShopLogger::addLog(
-                sprintf('[ps_ga4_datalayer] GA4DataLayerFormatter::%s - %s', $context, $e->getMessage()),
-                2,
-                null,
-                'GA4DataLayerFormatter',
-                0,
-                true
-            );
+        try {
+            if (class_exists(PrestaShopLogger::class)) {
+                PrestaShopLogger::addLog(
+                    sprintf('[ps_ga4_datalayer] GA4DataLayerFormatter::%s - %s', $context, $e->getMessage()),
+                    2,
+                    null,
+                    'GA4DataLayerFormatter',
+                    0,
+                    true
+                );
+            }
+        } catch (Throwable $loggingFailure) {
+            // Deliberately empty - see the note in Ps_ga4_datalayer::logWarning().
         }
     }
 }
