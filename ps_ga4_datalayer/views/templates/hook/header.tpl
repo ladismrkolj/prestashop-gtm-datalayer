@@ -11,7 +11,20 @@
  *}
 <script type="text/javascript">
     window.dataLayer = window.dataLayer || [];
-    Array.prototype.push.apply(window.dataLayer, JSON.parse(atob('{$ga4_events_b64}')));
+    (function () {
+        var events = JSON.parse(atob('{$ga4_events_b64}'));
+        for (var i = 0; i < events.length; i += 1) {
+            // Google requires clearing the previous ecommerce object before
+            // each new ecommerce push: GTM's data model MERGES successive
+            // pushes, so without this the items array of a previous event
+            // bleeds into the next one (e.g. a 12-product view_item_list
+            // leaving stale items behind on a 1-product select_item).
+            if (events[i] && events[i].ecommerce) {
+                window.dataLayer.push({ ecommerce: null });
+            }
+            window.dataLayer.push(events[i]);
+        }
+    })();
     window.psGa4ListItems = Object.assign({}, window.psGa4ListItems || {}, JSON.parse(atob('{$ga4_list_items_b64}')));
     window.psGa4CurrentItem = JSON.parse(atob('{$ga4_current_item_b64}')) || window.psGa4CurrentItem || null;
 </script>

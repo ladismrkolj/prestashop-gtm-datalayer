@@ -24,6 +24,9 @@ jobs:
       - name: Hook smoke test (no fatals, no swallowed errors)
         run: php tests/hook-smoke-test.php
 
+      - name: DataLayer ecommerce-clearing test
+        run: php tests/datalayer-ecommerce-clear-test.php
+
   js-lint:
     runs-on: ubuntu-latest
     steps:

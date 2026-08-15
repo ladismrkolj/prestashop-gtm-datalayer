@@ -65,6 +65,16 @@
 
     function push(eventName, extra) {
         var payload = Object.assign({ event: eventName }, extra || {});
+
+        // Google requires clearing the previous ecommerce object before
+        // each new ecommerce push. GTM's data model merges successive
+        // pushes, so without this the items array from an earlier event
+        // (e.g. a full view_item_list) bleeds into a later, smaller one
+        // (e.g. select_item), inflating item counts and revenue.
+        if (payload.ecommerce) {
+            window.dataLayer.push({ ecommerce: null });
+        }
+
         window.dataLayer.push(payload);
         if (window.psGa4Debug) {
             // eslint-disable-next-line no-console
