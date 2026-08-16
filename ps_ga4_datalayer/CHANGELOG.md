@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.0.5
+
+Fixes a batch of event triggers that were written against *assumed*
+PrestaShop contracts. Each is now verified against upstream source.
+
+- Fix: **`view_item` never fired on Quick View.** The Classic theme emits
+  `clickQuickView` with the DOM *element* as its payload (`listing.js` reads
+  `elm.dataset.idProduct`); the handler treated it as `{id_product: ...}`,
+  resolved nothing and returned early.
+- Fix: **`remove_from_cart` never fired from the cart page.** `updateCart`
+  passes the clicked element's raw `dataset`, so `reason.linkAction` is
+  `delete-from-cart` (per `cart-detailed-product-line.tpl`), but the handler
+  only matched `delete`.
+- Fix: **`view_item_variants` fired twice per combination change.**
+  `updateProduct` (theme requests a refresh) and `updatedProduct` (core
+  reports completion) are two halves of one interaction, not aliases. Now
+  only the completion event is used - which is also the one carrying
+  product data.
+- Fix: **`apply_voucher` never fired.** The Classic theme's voucher link is
+  `data-link-action="add-voucher"`; none of the three spellings previously
+  matched.
+- Fix: **`newsletter_signup` never fired.** `ps_emailsubscription` submits a
+  plain `<form method="post">` causing a full page reload, so waiting for a
+  DOM mutation after submit could never work. Detected at page load instead,
+  via `.notification-success` (not `.alert-success`) in the newsletter
+  block. Error responses are correctly not counted.
+- Fix: **`out_of_stock_alert` never fired.** `ps_emailalerts` renders no
+  `<form>` at all - it is a `.js-mailalert-add` button posting by AJAX - so
+  a `submit` listener could never match. Now tracks the button click and
+  waits for the success article in `.js-mailalert-alerts`.
+- Fix: **`review_submitted` never fired.** `productcomments` signals success
+  by opening the `#product-comment-posted-modal` modal, not by rendering an
+  `.alert-success`.
+- Fix: **`share` reported `method: "unknown"`.** `ps_sharebuttons` puts the
+  network name on the `<li>`, not the `<a>`.
+- Fix: **`login` could fire for a visitor who was not logged in** (e.g. on
+  arriving at the login page), if a pending flag survived from an earlier
+  request. Pending login/sign_up flags are now only emitted while the
+  customer is actually authenticated; otherwise they are discarded.
+- Adds `tests/event-triggers-test.js` and a shared `tests/lib/dom-harness.js`
+  (both run in CI). Every case encodes the real upstream contract with a
+  source citation, and each fix above was re-broken to confirm the test
+  fails on it.
+
 ## 1.0.4
 
 - Fix: `add_to_wishlist` never fired with PrestaShop's official
