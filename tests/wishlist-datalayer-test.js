@@ -28,9 +28,7 @@
 
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
+const {makeEl, buildEnvironment, loadFrontJs, eventsNamed} = require('./lib/dom-harness.js');
 
 const failures = [];
 function check(label, ok, detail) {
@@ -46,139 +44,8 @@ function check(label, ok, detail) {
  *  Minimal DOM
  * ------------------------------------------------------------------ */
 
-function makeEl(tag, attrs, className) {
-  const el = {
-    tagName: tag.toUpperCase(),
-    className: className || '',
-    _attrs: Object.assign({}, attrs || {}),
-    parentElement: null,
-    children: [],
-    textContent: '',
-    hasAttribute(n) { return Object.prototype.hasOwnProperty.call(this._attrs, n); },
-    getAttribute(n) { return this.hasAttribute(n) ? this._attrs[n] : null; },
-    setAttribute(n, v) { this._attrs[n] = String(v); },
-    appendChild(child) { child.parentElement = this; this.children.push(child); return child; },
-    matches(sel) { return selectorMatches(this, sel); },
-    closest(sel) {
-      let node = this;
-      while (node) {
-        if (selectorMatches(node, sel)) return node;
-        node = node.parentElement;
-      }
-      return null;
-    },
-    querySelector() { return null; },
-    querySelectorAll() { return []; },
-  };
-  return el;
-}
-
-/** Supports the selector forms front.js actually uses. */
-function selectorMatches(el, selector) {
-  if (!el || !selector) return false;
-  return String(selector).split(',').some((raw) => {
-    const part = raw.trim();
-    if (!part) return false;
-    const classes = String(el.className || '').split(/\s+/).filter(Boolean);
-
-    // [class*="x"]
-    const contains = part.match(/^\[class\*=["']([^"']+)["']\]$/);
-    if (contains) return String(el.className || '').includes(contains[1]);
-
-    // [attr]
-    const attrOnly = part.match(/^\[([a-z-]+)\]$/i);
-    if (attrOnly) return el.hasAttribute(attrOnly[1]);
-
-    // .a.b / .a
-    if (part.startsWith('.') && !part.includes(' ') && !part.includes('[')) {
-      return part.split('.').filter(Boolean).every((c) => classes.includes(c));
-    }
-
-    // tag[attr][attr]
-    const tagAttrs = part.match(/^([a-z]+)((\[[^\]]+\])+)$/i);
-    if (tagAttrs) {
-      if (el.tagName !== tagAttrs[1].toUpperCase()) return false;
-      const names = tagAttrs[2].match(/\[([^\]=]+)(?:=[^\]]*)?\]/g) || [];
-      return names.every((n) => el.hasAttribute(n.replace(/[[\]]/g, '').split('=')[0]));
-    }
-
-    // descendant "a b" - approximate via ancestor walk on the last token
-    if (part.includes(' ')) {
-      const tokens = part.split(/\s+/);
-      const last = tokens[tokens.length - 1];
-      if (!selectorMatches(el, last)) return false;
-      let node = el.parentElement;
-      while (node) {
-        if (selectorMatches(node, tokens.slice(0, -1).join(' '))) return true;
-        node = node.parentElement;
-      }
-      return false;
-    }
-
-    if (/^[a-z]+$/i.test(part)) return el.tagName === part.toUpperCase();
-    return false;
-  });
-}
-
-function buildEnvironment() {
-  const listeners = {};
-  const documentEl = makeEl('body');
-
-  const document = {
-    readyState: 'complete',
-    body: documentEl,
-    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
-    removeEventListener() {},
-    querySelector() { return null; },
-    querySelectorAll() { return []; },
-    _dispatch(type, target) {
-      (listeners[type] || []).forEach((fn) => fn({ type, target }));
-    },
-  };
-
-  const psHandlers = {};
-  const wishlistHandlers = {};
-
-  const win = {
-    document,
-    dataLayer: [],
-    setTimeout: (fn, ms) => setTimeout(fn, ms),
-    clearInterval: (id) => clearInterval(id),
-    setInterval: (fn, ms) => setInterval(fn, ms),
-    psGa4Config: { currency: 'EUR', trackPromotions: true, trackEngagement: true },
-    psGa4ListItems: {},
-    psGa4CurrentItem: null,
-    prestashop: {
-      on(evt, cb) { (psHandlers[evt] = psHandlers[evt] || []).push(cb); },
-      emit(evt, data) { (psHandlers[evt] || []).forEach((cb) => cb(data)); },
-    },
-    MutationObserver: function () { return { observe() {}, disconnect() {} }; },
-    IntersectionObserver: undefined,
-  };
-  win.window = win;
-
-  /** Stand-in for blockwishlist's Vue EventBus, exposed exactly as it does. */
-  const wishlistBus = {
-    $on(evt, cb) { (wishlistHandlers[evt] = wishlistHandlers[evt] || []).push(cb); },
-    $emit(evt, payload) { (wishlistHandlers[evt] || []).forEach((cb) => cb(payload)); },
-  };
-
-  return { win, document, wishlistBus };
-}
-
-function loadFrontJs(env) {
-  const src = fs.readFileSync(
-    path.join(__dirname, '..', 'ps_ga4_datalayer', 'views', 'js', 'front.js'),
-    'utf8'
-  );
-  const ctx = vm.createContext(
-    Object.assign(env.win, { console, Object, Array, String, Number, Math, JSON, parseFloat, parseInt, isNaN, WeakSet, Date })
-  );
-  vm.runInContext(src, ctx);
-}
-
 function ga4Events(win) {
-  return win.dataLayer.filter((e) => e && e.event === 'add_to_wishlist');
+  return eventsNamed(win, 'add_to_wishlist');
 }
 
 /* ================================================================== *

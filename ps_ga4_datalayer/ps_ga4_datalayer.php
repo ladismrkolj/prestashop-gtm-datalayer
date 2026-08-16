@@ -100,7 +100,7 @@ class Ps_ga4_datalayer extends Module
     {
         $this->name = 'ps_ga4_datalayer';
         $this->tab = 'analytics_stats';
-        $this->version = '1.0.4';
+        $this->version = '1.0.5';
         $this->author = 'ladismrkolj';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -531,8 +531,22 @@ class Ps_ga4_datalayer extends Module
         }
 
         if ($this->configBool(self::CONFIG_TRACK_ENGAGEMENT)) {
-            $events[] = $this->consumeCookieEvent(self::COOKIE_LOGIN_PENDING, 'login', ['method' => 'email']);
-            $events[] = $this->consumeCookieEvent(self::COOKIE_SIGNUP_PENDING, 'sign_up', ['method' => 'email']);
+            // A pending login/sign_up flag is only meaningful while the
+            // visitor is actually authenticated. Without this guard a flag
+            // left over from an earlier request (e.g. one that never
+            // rendered a header, or a session that was since logged out)
+            // could surface on a later page - notably the login page
+            // itself, before any credentials were entered. When not logged
+            // in, the flag is consumed and discarded rather than emitted.
+            $isLogged = $this->customerIsLogged();
+
+            $login = $this->consumeCookieEvent(self::COOKIE_LOGIN_PENDING, 'login', ['method' => 'email']);
+            $signup = $this->consumeCookieEvent(self::COOKIE_SIGNUP_PENDING, 'sign_up', ['method' => 'email']);
+
+            if ($isLogged) {
+                $events[] = $login;
+                $events[] = $signup;
+            }
         }
 
         return array_values(array_filter($events));
@@ -712,6 +726,21 @@ class Ps_ga4_datalayer extends Module
         }
 
         return ['event' => 'search', 'search_term' => $this->getFormatter()->clean($searchTerm)];
+    }
+
+    private function customerIsLogged(): bool
+    {
+        try {
+            $customer = $this->context->customer ?? null;
+
+            return $customer !== null
+                && method_exists($customer, 'isLogged')
+                && $customer->isLogged();
+        } catch (Throwable $e) {
+            $this->logWarning('customerIsLogged', $e);
+
+            return false;
+        }
     }
 
     private function consumeCookieEvent(string $cookieKey, string $eventName, array $extra = []): ?array

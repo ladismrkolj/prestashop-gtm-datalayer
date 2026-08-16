@@ -48,13 +48,17 @@
             paymentOptionName: '.payment-option-name, .payment_module_name, label',
             voucherForm: '#promo-code-form, form[name="voucher"], form[name="addDiscount"]',
             voucherInput: 'input[name="discount_name"], #promo-code, input[name="voucher_code"]',
-            newsletterForm: '#block-newsletter form, form[name="newsletter"], .block-newsletter form',
-            newsletterEmailInput: 'input[type="email"]',
-            newsletterSuccess: '.alert-success, .block-newsletter .alert-success, .newsletter-msg.alert-success',
-            mailAlertForm: '#mailalert_block form, form[id*="mailalert"], .product-availability form',
-            mailAlertSuccess: '.alert-success',
-            reviewForm: '#product-comment-form, form[id*="comment-form"], form[name="product_comment"]',
-            reviewSuccess: '.alert-success, .comment-confirmation',
+            // ps_emailsubscription: success renders as
+            // `.notification-success` inside #blockEmailSubscription_<hook>
+            newsletterSuccess:
+                '.block_newsletter .notification-success, [id^="blockEmailSubscription"] .notification-success, .block-newsletter .alert-success',
+            // ps_emailalerts: a button inside .js-mailalert, no <form>
+            mailAlertWrapper: '.js-mailalert',
+            mailAlertButton: '.js-mailalert-add',
+            mailAlertSuccess: '.js-mailalert-alerts [data-alert="success"], .js-mailalert-alerts .alert-success',
+            // productcomments: AJAX form + confirmation modal
+            reviewForm: '#post-product-comment-form, form[id*="comment-form"], form[name="product_comment"]',
+            reviewSuccessModal: '#product-comment-posted-modal',
         },
         window.ga4DataLayerSelectors || {}
     );
@@ -80,6 +84,47 @@
             // eslint-disable-next-line no-console
             console.log('[GA4 dataLayer]', payload);
         }
+    }
+
+    /**
+     * Resolve a product id from whatever a PrestaShop bus event hands over:
+     * a DOM element (clickQuickView passes the miniature itself), a jQuery
+     * wrapper, or a plain object. Falls back to the nearest
+     * [data-id-product] ancestor.
+     */
+    function readProductId(subject) {
+        if (!subject) {
+            return null;
+        }
+
+        // jQuery object -> underlying element
+        var el = subject.jquery && subject.length ? subject[0] : subject;
+
+        if (el && el.dataset) {
+            if (el.dataset.idProduct) {
+                return el.dataset.idProduct;
+            }
+            if (el.dataset.productId) {
+                return el.dataset.productId;
+            }
+        }
+        if (el && typeof el.getAttribute === 'function') {
+            var direct = el.getAttribute('data-id-product') || el.getAttribute('data-product-id');
+            if (direct) {
+                return direct;
+            }
+            var holder = closest(el, '[data-id-product]');
+            if (holder) {
+                return holder.getAttribute('data-id-product');
+            }
+        }
+
+        // Plain object payloads (other emitters / third-party modules)
+        if (typeof el === 'object') {
+            return el.id_product || el.idProduct || el.productId || null;
+        }
+
+        return null;
     }
 
     function closest(el, selector) {
@@ -221,10 +266,13 @@
             return;
         }
 
-        window.prestashop.on('clickQuickView', function (data) {
-            var idProduct =
-                (data && (data.id_product || data.idProduct)) ||
-                (data && data.target && closest(data.target, '[data-id-product]') && closest(data.target, '[data-id-product]').getAttribute('data-id-product'));
+        // IMPORTANT: the Classic theme emits clickQuickView with the DOM
+        // ELEMENT as its payload, not an object - see classic-theme
+        // _dev/js/listing.js, which reads `elm.dataset.idProduct`. Treating
+        // the payload as `{id_product: ...}` (as an earlier version did)
+        // resolves nothing and the event never fires.
+        window.prestashop.on('clickQuickView', function (elm) {
+            var idProduct = readProductId(elm);
 
             if (!idProduct) {
                 return;
@@ -256,7 +304,16 @@
             var resp = (data && data.resp) || {};
             var linkAction = reason.linkAction || reason.link_action;
 
-            if (linkAction !== 'add-to-cart' && linkAction !== 'delete') {
+            // `reason` is the raw dataset of the clicked element (see
+            // classic-theme _dev/js/cart.js: `reason: dataset`), so
+            // linkAction mirrors data-link-action verbatim. The cart's
+            // delete link is data-link-action="delete-from-cart" - matching
+            // only 'delete' (as an earlier version did) meant
+            // remove_from_cart never fired from the cart page.
+            var isAdd = linkAction === 'add-to-cart';
+            var isRemove = linkAction === 'delete-from-cart' || linkAction === 'delete';
+
+            if (!isAdd && !isRemove) {
                 return; // update-quantity and other reasons are out of scope
             }
 
@@ -276,7 +333,7 @@
                 item.price = toFloat(price);
             }
 
-            var eventName = linkAction === 'add-to-cart' ? 'add_to_cart' : 'remove_from_cart';
+            var eventName = isAdd ? 'add_to_cart' : 'remove_from_cart';
 
             push(eventName, {
                 ecommerce: {
@@ -318,7 +375,7 @@
     }
 
     /* ------------------------------------------------------------------ *
-     *  view_item_variants (prestashop.on('updateProduct'))
+     *  view_item_variants (prestashop.on('updatedProduct'))
      * ------------------------------------------------------------------ */
 
     function initVariantChange() {
@@ -326,38 +383,52 @@
             return;
         }
 
-        ['updateProduct', 'updatedProduct'].forEach(function (eventName) {
-            window.prestashop.on(eventName, function (data) {
-                var resp = (data && data.resp) || {};
-                var product = resp.product || resp;
+        // `updateProduct` and `updatedProduct` are two halves of ONE
+        // interaction, not aliases: the theme emits `updateProduct` to
+        // REQUEST a refresh (classic-theme _dev/js/product.js), and core
+        // emits `updatedProduct` once the new combination has actually
+        // loaded. Subscribing to both (as an earlier version did) produced
+        // two view_item_variants per single click. Only the completion
+        // event is correct - it is also the one carrying product data.
+        window.prestashop.on('updatedProduct', function (data) {
+            var payload = data || {};
+            var product = payload.product || (payload.resp && payload.resp.product) || payload.resp || payload;
 
-                var idProduct = product.id_product || moduleConfig.currentProductId || (data && data.product_id);
-                if (!idProduct) {
-                    return;
-                }
+            var idProduct =
+                product.id_product ||
+                payload.id_product ||
+                moduleConfig.currentProductId;
 
-                var overrides = {};
-                if (product.id_product_attribute) {
-                    overrides.item_variant = String(product.reference || product.id_product_attribute);
-                }
-                if (product.price_amount != null) {
-                    overrides.price = toFloat(product.price_amount);
-                } else if (product.price != null) {
-                    overrides.price = toFloat(product.price);
-                }
-                if (product.reference) {
-                    overrides.item_id = String(product.reference);
-                }
+            if (!idProduct) {
+                return;
+            }
 
-                var item = resolveItem(idProduct, overrides);
+            var idProductAttribute =
+                product.id_product_attribute ||
+                payload.id_product_attribute ||
+                null;
 
-                push('view_item_variants', {
-                    ecommerce: {
-                        currency: currency(),
-                        value: toFloat(item.price),
-                        items: [item],
-                    },
-                });
+            var overrides = {};
+            if (idProductAttribute) {
+                overrides.item_variant = String(product.reference || idProductAttribute);
+            }
+            if (product.price_amount != null) {
+                overrides.price = toFloat(product.price_amount);
+            } else if (product.price != null) {
+                overrides.price = toFloat(product.price);
+            }
+            if (product.reference) {
+                overrides.item_id = String(product.reference);
+            }
+
+            var item = resolveItem(idProduct, overrides);
+
+            push('view_item_variants', {
+                ecommerce: {
+                    currency: currency(),
+                    value: toFloat(item.price),
+                    items: [item],
+                },
             });
         });
     }
@@ -573,7 +644,16 @@
                     return;
                 }
 
-                var method = (link.className || '').split(/\s+/).filter(Boolean)[0] || 'unknown';
+                // ps_sharebuttons renders `<li class="facebook"><a>` - the
+                // network name is on the LI, not the anchor, so reading the
+                // anchor's class (as an earlier version did) always yielded
+                // "unknown".
+                var holder = closest(link, 'li') || link;
+                var method =
+                    (holder.className || '').split(/\s+/).filter(Boolean)[0] ||
+                    (link.className || '').split(/\s+/).filter(Boolean)[0] ||
+                    text(link) ||
+                    'unknown';
                 var idProduct = moduleConfig.currentProductId;
 
                 push('share', {
@@ -665,7 +745,15 @@
                 var reason = (data && data.reason) || {};
                 var linkAction = reason.linkAction || reason.link_action;
 
-                if (linkAction !== 'addDiscount' && linkAction !== 'add-discount' && linkAction !== 'addVoucher') {
+                // The Classic theme's voucher link is
+                // data-link-action="add-voucher"; the camelCase spellings
+                // are kept for third-party carts.
+                if (
+                    linkAction !== 'add-voucher' &&
+                    linkAction !== 'addDiscount' &&
+                    linkAction !== 'add-discount' &&
+                    linkAction !== 'addVoucher'
+                ) {
                     return;
                 }
 
@@ -682,45 +770,79 @@
      *  out_of_stock_alert (ps_emailalerts back-in-stock form)
      * ------------------------------------------------------------------ */
 
+    /**
+     * ps_emailalerts renders NO <form> at all - it is a plain
+     * <div class="js-mailalert"> holding an email input and a
+     * <button class="js-mailalert-add" data-product data-product-attribute>
+     * that posts by AJAX (see the module's js/mailalerts.js). Listening for
+     * a `submit` event, as an earlier version did, could therefore never
+     * fire. Success is rendered into `.js-mailalert-alerts` as
+     * `<article class="alert alert-success" data-alert="success">`.
+     */
     function initOutOfStockAlert() {
-        document.addEventListener('submit', function (event) {
-            var form = closest(event.target, SELECTORS.mailAlertForm);
-            if (!form) {
-                return;
-            }
+        document.addEventListener(
+            'click',
+            function (event) {
+                var button = closest(event.target, SELECTORS.mailAlertButton);
+                if (!button) {
+                    return;
+                }
 
-            var idProduct = moduleConfig.currentProductId;
+                var idProduct =
+                    button.getAttribute('data-product') ||
+                    readProductId(button) ||
+                    moduleConfig.currentProductId;
 
-            watchForSuccess(form.closest('div') || form.parentElement || document.body, SELECTORS.mailAlertSuccess, 6000, function () {
-                push('out_of_stock_alert', {
-                    item_id: idProduct ? String(idProduct) : undefined,
+                var wrapper = closest(button, SELECTORS.mailAlertWrapper) || document.body;
+
+                watchForSuccess(wrapper, SELECTORS.mailAlertSuccess, 8000, function () {
+                    push('out_of_stock_alert', {
+                        item_id: idProduct ? String(idProduct) : undefined,
+                    });
                 });
-            });
-        });
+            },
+            true
+        );
     }
 
     /* ------------------------------------------------------------------ *
-     *  newsletter_signup (blocknewsletter footer module)
+     *  newsletter_signup (ps_emailsubscription footer module)
      * ------------------------------------------------------------------ */
 
+    /**
+     * ps_emailsubscription submits a plain <form method="post"> that causes
+     * a FULL PAGE RELOAD - there is no AJAX. Watching the DOM for a success
+     * message after submit (as an earlier version did) could never work,
+     * because the page navigates away before any mutation happens.
+     *
+     * The result is rendered on the *next* page load as
+     * `<p class="notification notification-success">` inside
+     * `#blockEmailSubscription_<hook>`, and only when the module actually
+     * processed a submission - so detecting it at load time is both correct
+     * and self-limiting. Note the class is `notification-success`, not
+     * Bootstrap's `alert-success`.
+     */
     function initNewsletterSignup() {
-        document.addEventListener('submit', function (event) {
-            var form = closest(event.target, SELECTORS.newsletterForm);
-            if (!form) {
-                return;
-            }
+        var success = document.querySelector(SELECTORS.newsletterSuccess);
+        if (!success) {
+            return;
+        }
 
-            watchForSuccess(form.parentElement || document.body, SELECTORS.newsletterSuccess, 6000, function () {
-                // No PII (email address) is pushed to the dataLayer by design.
-                push('newsletter_signup', { method: 'footer_block' });
-            });
-        });
+        // No PII (the email address) is ever pushed to the dataLayer.
+        push('newsletter_signup', { method: 'footer_block' });
     }
 
     /* ------------------------------------------------------------------ *
      *  review_submitted (productcomments module)
      * ------------------------------------------------------------------ */
 
+    /**
+     * productcomments posts `#post-product-comment-form` by AJAX and, on
+     * success, opens the `#product-comment-posted-modal` Bootstrap modal
+     * (see the module's views/js/post-comment.js). The confirmation is that
+     * modal becoming visible - not an `.alert-success` anywhere on the
+     * page, which is what an earlier version waited for.
+     */
     function initReviewSubmitted() {
         document.addEventListener('submit', function (event) {
             var form = closest(event.target, SELECTORS.reviewForm);
@@ -730,12 +852,52 @@
 
             var idProduct = moduleConfig.currentProductId;
 
-            watchForSuccess(document.body, SELECTORS.reviewSuccess, 8000, function () {
+            waitForVisible(SELECTORS.reviewSuccessModal, 10000, function () {
                 push('review_submitted', {
                     item_id: idProduct ? String(idProduct) : undefined,
                 });
             });
         });
+    }
+
+    /**
+     * Resolves once the element matching `selector` becomes visible, which
+     * for a Bootstrap modal means gaining the `show` class / a non-none
+     * display. Used where the success signal is a modal rather than an
+     * inline message.
+     */
+    function waitForVisible(selector, timeoutMs, callback) {
+        var done = false;
+        var started = Date.now();
+
+        var isVisible = function (el) {
+            if (!el) {
+                return false;
+            }
+            if (el.classList && el.classList.contains('show')) {
+                return true;
+            }
+            var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+
+            return !!(style && style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null);
+        };
+
+        var timer = window.setInterval(function () {
+            if (done) {
+                window.clearInterval(timer);
+                return;
+            }
+            if (isVisible(document.querySelector(selector))) {
+                done = true;
+                window.clearInterval(timer);
+                callback();
+                return;
+            }
+            if (Date.now() - started > timeoutMs) {
+                done = true;
+                window.clearInterval(timer);
+            }
+        }, 200);
     }
 
     /* ------------------------------------------------------------------ *

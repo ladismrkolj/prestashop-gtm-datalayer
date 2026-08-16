@@ -60,9 +60,9 @@ exactly as pasted either way.
 |---|---|---|
 | 1 | `view_item_list` | Category, brand, supplier & search result pages (server-rendered) |
 | 2 | `select_item` | Click on a product card in a list/grid |
-| 3 | `view_item` | Product page load, and Quick View (`prestashop.on('clickQuickView')`) |
+| 3 | `view_item` | Product page load, and Quick View (`clickQuickView`, whose payload is a DOM element) |
 | 4 | `add_to_cart` | `prestashop.on('updateCart')` with `reason.linkAction === 'add-to-cart'` |
-| 5 | `remove_from_cart` | `prestashop.on('updateCart')` with `reason.linkAction === 'delete'` |
+| 5 | `remove_from_cart` | `updateCart` with `reason.linkAction === 'delete-from-cart'` |
 | 6 | `view_cart` | `/cart` page load |
 | 7 | `begin_checkout` | Entering the `order` (checkout) controller |
 | 8 | `add_shipping_info` | `prestashop.on('updatedDeliveryForm')` |
@@ -77,7 +77,7 @@ exactly as pasted either way.
 |---|---|---|
 | 13 | `add_to_wishlist` | Confirmed add via `blockwishlist`'s `addedToWishlist` event (falls back to click for other wishlist modules) |
 | 14 | `refund` | `hookActionOrderSlipAdd` (credit slip), sent server-to-server via GA4 Measurement Protocol |
-| 15 | `view_item_variants` | `prestashop.on('updateProduct'/'updatedProduct')` on combination change |
+| 15 | `view_item_variants` | `updatedProduct` (the completion event) on combination change |
 
 ### C. Store engagement (4)
 
@@ -92,10 +92,10 @@ exactly as pasted either way.
 
 | # | Event | Trigger |
 |---|---|---|
-| 20 | `apply_voucher` | Promo code successfully applied to the cart |
-| 21 | `out_of_stock_alert` | Back-in-stock email form submitted (`ps_emailalerts`) |
-| 22 | `newsletter_signup` | Footer newsletter block submitted (`blocknewsletter`) |
-| 23 | `review_submitted` | Product comment/review form submitted (`productcomments`) |
+| 20 | `apply_voucher` | Promo code applied (`data-link-action="add-voucher"`) |
+| 21 | `out_of_stock_alert` | `ps_emailalerts` button click, once the AJAX success message renders |
+| 22 | `newsletter_signup` | `ps_emailsubscription` success notice detected on page load (it posts with a full reload) |
+| 23 | `review_submitted` | `productcomments` confirmation modal opens |
 
 ## Architecture
 

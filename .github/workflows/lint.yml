@@ -39,3 +39,6 @@ jobs:
 
       - name: add_to_wishlist dataLayer test
         run: node tests/wishlist-datalayer-test.js
+
+      - name: Event-trigger contract test
+        run: node tests/event-triggers-test.js
