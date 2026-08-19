@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.1.0
+
+Adds GA4 first-party data - the "Add first-party data" checklist in GA4
+(**Set up User-ID**, **Set up user-provided data**, **Set up Measurement
+Protocol**). These matter increasingly as third-party cookies and
+client-side signals degrade.
+
+- **User-ID** (new switch, on by default). Pushes `user_id` for logged-in
+  customers so GA4 stitches their sessions across devices and browsers.
+  The value is the PrestaShop customer ID - an opaque internal number,
+  never an email, since Google forbids PII as `user_id`. Pushed *before*
+  any event on the page, so the first event of a session is attributed to
+  the identified user rather than to an anonymous one.
+- **`user_properties`** alongside it: `logged_in`, `customer_type`
+  (new/returning, from validated order count), `customer_group` and
+  `newsletter_subscriber` - all non-identifying, useful for audiences and
+  report comparisons.
+- **User-provided data / enhanced conversions** (new switch, **off** by
+  default). Sends `user_data` with SHA-256 hashed email, phone and name,
+  plus unhashed city/postcode/country, following Google's normalisation
+  rules: emails lowercased with gmail dots stripped, phones converted to
+  E.164 using the address country's dialling prefix, names lowercased.
+  Hashing happens server-side - raw values never reach the browser. A
+  phone that cannot be put in E.164 is skipped rather than sent in a
+  format Google would silently fail to match.
+- **Measurement Protocol** refunds now carry `user_id` too, so a
+  server-side refund joins the same GA4 user as the original purchase.
+- Nothing is sent for anonymous visitors, under either switch.
+- Adds `tests/first-party-data-test.php` (run in CI). Its expected SHA-256
+  digests were computed independently with Python's hashlib rather than
+  with the code under test, so the normalisation rules are genuinely
+  cross-checked; it also asserts no raw email, name or phone digits appear
+  anywhere in the payload. The hook smoke test now additionally verifies
+  the payload actually reaches the template.
+
 ## 1.0.5
 
 Fixes a batch of event triggers that were written against *assumed*

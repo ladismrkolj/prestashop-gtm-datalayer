@@ -38,6 +38,7 @@ if (file_exists(__DIR__ . '/vendor/autoload.php')) {
 }
 
 use PsGa4DataLayer\Service\GA4DataLayerFormatter;
+use PsGa4DataLayer\Service\GA4UserDataBuilder;
 
 class Ps_ga4_datalayer extends Module
 {
@@ -60,6 +61,16 @@ class Ps_ga4_datalayer extends Module
     public const CONFIG_MP_MEASUREMENT_ID = 'PS_GTM_MP_MEASUREMENT_ID';
     public const CONFIG_MP_API_SECRET = 'PS_GTM_MP_API_SECRET';
 
+    /*
+     * GA4 first-party data (the "Add first-party data" checklist in GA4):
+     * User-ID stitches sessions across devices, and user-provided data
+     * (UPD / enhanced conversions) lets Google match conversions when the
+     * cookie is missing. UPD is off by default - hashed contact data is
+     * still personal data and needs a lawful basis plus consent.
+     */
+    public const CONFIG_TRACK_USER_ID = 'PS_GTM_TRACK_USER_ID';
+    public const CONFIG_USER_PROVIDED_DATA = 'PS_GTM_USER_PROVIDED_DATA';
+
     private const CONFIG_KEYS = [
         self::CONFIG_HEAD_SNIPPET,
         self::CONFIG_BODY_SNIPPET,
@@ -68,6 +79,8 @@ class Ps_ga4_datalayer extends Module
         self::CONFIG_TRACK_ENGAGEMENT,
         self::CONFIG_MP_MEASUREMENT_ID,
         self::CONFIG_MP_API_SECRET,
+        self::CONFIG_TRACK_USER_ID,
+        self::CONFIG_USER_PROVIDED_DATA,
     ];
 
     private const HOOKS = [
@@ -87,6 +100,8 @@ class Ps_ga4_datalayer extends Module
 
     private ?GA4DataLayerFormatter $formatter = null;
 
+    private ?GA4UserDataBuilder $userDataBuilder = null;
+
     /** Set to true within the current request as soon as a fresh signup fires, to avoid also counting it as a login. */
     private bool $signupJustHappened = false;
 
@@ -100,7 +115,7 @@ class Ps_ga4_datalayer extends Module
     {
         $this->name = 'ps_ga4_datalayer';
         $this->tab = 'analytics_stats';
-        $this->version = '1.0.5';
+        $this->version = '1.1.0';
         $this->author = 'ladismrkolj';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -155,7 +170,9 @@ class Ps_ga4_datalayer extends Module
             && Configuration::updateValue(self::CONFIG_TRACK_PROMOTIONS, 1)
             && Configuration::updateValue(self::CONFIG_TRACK_ENGAGEMENT, 1)
             && Configuration::updateValue(self::CONFIG_MP_MEASUREMENT_ID, '')
-            && Configuration::updateValue(self::CONFIG_MP_API_SECRET, '', true);
+            && Configuration::updateValue(self::CONFIG_MP_API_SECRET, '', true)
+            && Configuration::updateValue(self::CONFIG_TRACK_USER_ID, 1)
+            && Configuration::updateValue(self::CONFIG_USER_PROVIDED_DATA, 0);
     }
 
     /**
@@ -214,7 +231,9 @@ class Ps_ga4_datalayer extends Module
             && Configuration::updateValue(self::CONFIG_TRACK_PROMOTIONS, (int) Tools::getValue(self::CONFIG_TRACK_PROMOTIONS))
             && Configuration::updateValue(self::CONFIG_TRACK_ENGAGEMENT, (int) Tools::getValue(self::CONFIG_TRACK_ENGAGEMENT))
             && Configuration::updateValue(self::CONFIG_MP_MEASUREMENT_ID, $mpMeasurementId)
-            && Configuration::updateValue(self::CONFIG_MP_API_SECRET, $mpApiSecret);
+            && Configuration::updateValue(self::CONFIG_MP_API_SECRET, $mpApiSecret)
+            && Configuration::updateValue(self::CONFIG_TRACK_USER_ID, (int) Tools::getValue(self::CONFIG_TRACK_USER_ID))
+            && Configuration::updateValue(self::CONFIG_USER_PROVIDED_DATA, (int) Tools::getValue(self::CONFIG_USER_PROVIDED_DATA));
 
         return $ok
             ? $this->displayConfirmation($this->l('Settings updated successfully.'))
@@ -262,6 +281,7 @@ class Ps_ga4_datalayer extends Module
 
         return $helper->generateForm([
             $this->getSnippetsFormDefinition(),
+            $this->getFirstPartyDataFormDefinition(),
             $this->getMeasurementProtocolFormDefinition(),
         ]);
     }
@@ -336,6 +356,47 @@ class Ps_ga4_datalayer extends Module
     }
 
     /** @return array<string, mixed> */
+    private function getFirstPartyDataFormDefinition(): array
+    {
+        return [
+            'form' => [
+                'legend' => [
+                    'title' => $this->l('First-party data (User-ID & user-provided data)'),
+                    'icon' => 'icon-user',
+                ],
+                'description' => $this->l('These cover two of the three items in GA4\'s "Add first-party data" checklist. User-ID links a customer\'s sessions across devices and browsers. User-provided data (also called enhanced conversions) sends SHA-256 hashed contact details so Google can still match a conversion when cookies are unavailable. Both apply only to logged-in customers - nothing is ever sent for anonymous visitors.'),
+                'input' => [
+                    [
+                        'type' => 'switch',
+                        'label' => $this->l('Send User-ID'),
+                        'name' => self::CONFIG_TRACK_USER_ID,
+                        'desc' => $this->l('Pushes the PrestaShop customer ID (an opaque internal number, never an email) plus non-identifying user properties: new/returning, customer group and newsletter status. In GTM, map the dataLayer variable "user_id" to the User ID field of your Google tag.'),
+                        'is_bool' => true,
+                        'values' => [
+                            ['id' => 'uid_on', 'value' => 1, 'label' => $this->l('Enabled')],
+                            ['id' => 'uid_off', 'value' => 0, 'label' => $this->l('Disabled')],
+                        ],
+                    ],
+                    [
+                        'type' => 'switch',
+                        'label' => $this->l('Send user-provided data (hashed)'),
+                        'name' => self::CONFIG_USER_PROVIDED_DATA,
+                        'desc' => $this->l('Off by default. Sends SHA-256 hashed email, phone and name, plus city/postcode/country, as GA4 user_data. Hashed contact data is still personal data under GDPR: enable this only if your privacy notice covers it and your consent banner gates it. Hashing happens on the server - raw values never reach the browser.'),
+                        'is_bool' => true,
+                        'values' => [
+                            ['id' => 'upd_on', 'value' => 1, 'label' => $this->l('Enabled')],
+                            ['id' => 'upd_off', 'value' => 0, 'label' => $this->l('Disabled')],
+                        ],
+                    ],
+                ],
+                'submit' => [
+                    'title' => $this->l('Save'),
+                ],
+            ],
+        ];
+    }
+
+    /** @return array<string, mixed> */
     private function getMeasurementProtocolFormDefinition(): array
     {
         return [
@@ -387,6 +448,8 @@ class Ps_ga4_datalayer extends Module
             self::CONFIG_TRACK_ENGAGEMENT => $this->configBool(self::CONFIG_TRACK_ENGAGEMENT),
             self::CONFIG_MP_MEASUREMENT_ID => (string) Configuration::get(self::CONFIG_MP_MEASUREMENT_ID),
             self::CONFIG_MP_API_SECRET => (string) Configuration::get(self::CONFIG_MP_API_SECRET),
+            self::CONFIG_TRACK_USER_ID => $this->configBool(self::CONFIG_TRACK_USER_ID),
+            self::CONFIG_USER_PROVIDED_DATA => $this->configBool(self::CONFIG_USER_PROVIDED_DATA),
         ];
     }
 
@@ -462,12 +525,16 @@ class Ps_ga4_datalayer extends Module
         // add_to_wishlist, add_to_cart, ...) don't need to re-fetch product
         // data: window.psGa4ListItems (keyed by id_product) and
         // window.psGa4CurrentItem (single product-page item).
+        $userPayload = $this->buildUserPayload();
+
         $this->context->smarty->assign([
             'ga4_enable_injection' => $this->configBool(self::CONFIG_ENABLE_INJECTION),
             'ga4_head_snippet' => (string) Configuration::get(self::CONFIG_HEAD_SNIPPET),
             'ga4_events_b64' => $this->jsonToBase64(array_values($events)),
             'ga4_list_items_b64' => $this->jsonToBase64($this->lastListItemsMap),
             'ga4_current_item_b64' => $this->jsonToBase64($this->lastCurrentItem),
+            'ga4_has_user_payload' => $userPayload !== [],
+            'ga4_user_b64' => $this->jsonToBase64($userPayload),
         ]);
 
         return $this->fetch('module:' . $this->name . '/views/templates/hook/header.tpl');
@@ -856,7 +923,14 @@ class Ps_ga4_datalayer extends Module
 
         $clientId = $this->lookupClientIdForOrder((int) $order->id);
         if ($clientId !== null) {
-            $this->sendMeasurementProtocolEvent('refund', $payload, $clientId);
+            // Attaching user_id lets GA4 join this server-side refund to the
+            // same person as the original client-side purchase, which is the
+            // whole point of the User-ID feature.
+            $userId = $this->configBool(self::CONFIG_TRACK_USER_ID) && (int) $order->id_customer > 0
+                ? (string) (int) $order->id_customer
+                : null;
+
+            $this->sendMeasurementProtocolEvent('refund', $payload, $clientId, $userId);
         }
     }
 
@@ -952,7 +1026,7 @@ class Ps_ga4_datalayer extends Module
     /**
      * @param array<string, mixed> $params
      */
-    private function sendMeasurementProtocolEvent(string $eventName, array $params, string $clientId): bool
+    private function sendMeasurementProtocolEvent(string $eventName, array $params, string $clientId, ?string $userId = null): bool
     {
         $measurementId = trim((string) Configuration::get(self::CONFIG_MP_MEASUREMENT_ID));
         $apiSecret = trim((string) Configuration::get(self::CONFIG_MP_API_SECRET));
@@ -967,13 +1041,19 @@ class Ps_ga4_datalayer extends Module
             rawurlencode($apiSecret)
         );
 
-        $body = json_encode([
+        $envelope = [
             'client_id' => $clientId,
             'events' => [[
                 'name' => $eventName,
                 'params' => $params,
             ]],
-        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        ];
+
+        if ($userId !== null && $userId !== '') {
+            $envelope['user_id'] = $userId;
+        }
+
+        $body = json_encode($envelope, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         if ($body === false) {
             return false;
@@ -1083,6 +1163,52 @@ class Ps_ga4_datalayer extends Module
         }
 
         return $this->formatter;
+    }
+
+    private function getUserDataBuilder(): GA4UserDataBuilder
+    {
+        if ($this->userDataBuilder === null) {
+            $this->userDataBuilder = new GA4UserDataBuilder($this->context);
+        }
+
+        return $this->userDataBuilder;
+    }
+
+    /**
+     * The first-party data block pushed ahead of every page's events.
+     *
+     * Order matters: GA4 must know the user_id BEFORE any event fires,
+     * otherwise the first event of the session is attributed to an
+     * anonymous user. hookDisplayHeader therefore pushes this first, then
+     * the page-load events, then the GTM container snippet.
+     *
+     * @return array<string, mixed> empty when there is nothing to say
+     */
+    private function buildUserPayload(): array
+    {
+        $builder = $this->getUserDataBuilder();
+        $payload = [];
+
+        if ($this->configBool(self::CONFIG_TRACK_USER_ID)) {
+            $userId = $builder->userId();
+            if ($userId !== null) {
+                $payload['user_id'] = $userId;
+            }
+
+            $properties = $builder->userProperties();
+            if ($properties !== []) {
+                $payload['user_properties'] = $properties;
+            }
+        }
+
+        if ($this->configBool(self::CONFIG_USER_PROVIDED_DATA)) {
+            $userData = $builder->userData();
+            if ($userData !== []) {
+                $payload['user_data'] = $userData;
+            }
+        }
+
+        return $payload;
     }
 
     /**

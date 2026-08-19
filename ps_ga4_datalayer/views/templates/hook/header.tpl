@@ -11,6 +11,12 @@
  *}
 <script type="text/javascript">
     window.dataLayer = window.dataLayer || [];
+{if $ga4_has_user_payload}
+    // First-party data (User-ID / user_properties / hashed user_data) is
+    // pushed BEFORE any event, so GA4 attributes the very first event of
+    // the session to the identified user rather than to an anonymous one.
+    window.dataLayer.push(JSON.parse(atob('{$ga4_user_b64}')));
+{/if}
     (function () {
         var events = JSON.parse(atob('{$ga4_events_b64}'));
         for (var i = 0; i < events.length; i += 1) {
