@@ -14,6 +14,7 @@ from the Back Office (no theme edits required).
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [The 23 events](#the-23-events)
+- [First-party data (User-ID, UPD, Measurement Protocol)](#first-party-data-user-id-upd-measurement-protocol)
 - [Architecture](#architecture)
 - [Customizing selectors](#customizing-selectors)
 - [Testing](#testing)
@@ -43,7 +44,9 @@ Manager → Configure**:
 | **Body snippet** | Paste Google's raw `<noscript>...</noscript>` GTM snippet for right after `<body>`. |
 | **Track promotions** | Enables `view_promotion` / `select_promotion`. |
 | **Track engagement** | Enables `search`, `login`, `sign_up`, `share`. |
-| **GA4 Measurement ID / API secret** *(optional)* | Only needed for the `refund` event - see below. |
+| **Send User-ID** | Pushes `user_id` + `user_properties` for logged-in customers (cross-device stitching). On by default. |
+| **Send user-provided data (hashed)** | SHA-256 hashed email/phone/name for enhanced conversions. **Off** by default - see the privacy note. |
+| **GA4 Measurement ID / API secret** *(optional)* | Needed for the `refund` event - see below. |
 
 Snippets are stored with `Configuration::updateValue(..., true)`. That flag
 alone isn't quite enough on shops with `PS_USE_HTMLPURIFIER` enabled
@@ -96,6 +99,95 @@ exactly as pasted either way.
 | 21 | `out_of_stock_alert` | `ps_emailalerts` button click, once the AJAX success message renders |
 | 22 | `newsletter_signup` | `ps_emailsubscription` success notice detected on page load (it posts with a full reload) |
 | 23 | `review_submitted` | `productcomments` confirmation modal opens |
+
+## First-party data (User-ID, UPD, Measurement Protocol)
+
+GA4's **Add first-party data** checklist has three items. This module
+covers all three.
+
+### 1. User-ID
+
+With **Send User-ID** enabled, every page for a logged-in customer pushes:
+
+```js
+{
+  user_id: "42",                    // PrestaShop customer ID - never an email
+  user_properties: {
+    logged_in: "yes",
+    customer_type: "returning",     // from validated order count
+    customer_group: "Customer",
+    newsletter_subscriber: "yes"
+  }
+}
+```
+
+This is pushed **before** any event on the page, so the first event of a
+session is attributed to the identified user rather than to an anonymous
+one.
+
+**GTM still needs one wiring step** - the dataLayer value does nothing on
+its own:
+
+1. Create a **Data Layer Variable** named e.g. `DLV - user_id`, with the
+   data layer variable name `user_id`.
+2. Open your **Google tag** (GA4 Configuration) → under *Configuration
+   settings* add a row: parameter name `user_id`, value `{{DLV - user_id}}`.
+3. For `user_properties`, create Data Layer Variables for the ones you
+   care about (`user_properties.customer_type`, etc.) and add them under
+   *User properties* on the same tag.
+
+In GA4 itself, set **Admin → Reporting identity** to *Blended* or
+*Observed* so User-ID is actually used for reporting.
+
+### 2. User-provided data (UPD / enhanced conversions)
+
+With **Send user-provided data** enabled, the same push also carries:
+
+```js
+user_data: {
+  sha256_email_address: "…",
+  sha256_phone_number:  "…",
+  address: {
+    sha256_first_name: "…",
+    sha256_last_name:  "…",
+    city: "ljubljana", postal_code: "1000", country: "si"
+  }
+}
+```
+
+Hashing happens **on the server** - raw values never reach the browser.
+Normalisation follows Google's rules (lowercase + trim; gmail dots
+stripped; phones converted to E.164 using the address country's dialling
+prefix; a phone that cannot be normalised is skipped rather than sent in a
+format Google would silently fail to match).
+
+In GTM: open your Google tag → *Include user-provided data* → choose
+**Manual configuration** → map the fields to Data Layer Variables reading
+`user_data.sha256_email_address`, `user_data.sha256_phone_number`, etc.
+
+> **Privacy.** This is off by default on purpose. Hashed contact data is
+> still personal data under GDPR - enable it only if your privacy notice
+> covers it and your consent banner gates it. Nothing is ever sent for
+> anonymous visitors.
+
+### 3. Measurement Protocol
+
+Already covered by the `refund` support described below: fill in the
+Measurement ID + API secret and admin-issued credit slips are sent
+server-to-server, now carrying `user_id` so the refund joins the same GA4
+user as the original purchase.
+
+`purchase` is deliberately **not** duplicated over the Measurement
+Protocol - it already fires client-side, and sending it twice would double
+your reported revenue.
+
+### Consent Mode v2
+
+Not implemented here by design. If you run a consent banner module (e.g.
+*Google Tag Manager Consent Mode Banner*), that module owns the consent
+defaults, and a second module writing them would conflict. Make sure its
+`gtag('consent', 'default', …)` runs **before** the GTM container loads -
+see the note in *Data mapping notes & assumptions*.
 
 ## Architecture
 
@@ -235,7 +327,10 @@ centralized and commented for this.
 
 ## Privacy
 
-- No PII (email addresses, names, etc.) is ever pushed to `window.dataLayer`.
+- No PII is ever pushed to `window.dataLayer` in the clear. `user_id` is
+  the opaque PrestaShop customer ID, never an email. Contact details reach
+  the dataLayer only if you explicitly enable user-provided data, and only
+  SHA-256 hashed (hashing happens server-side).
 - The GTM snippets you paste are entirely your responsibility, including
   configuring Consent Mode / cookie consent inside your GTM container.
 - The `refund` Measurement Protocol call only fires if you explicitly fill

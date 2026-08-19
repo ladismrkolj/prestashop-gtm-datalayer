@@ -27,6 +27,9 @@ jobs:
       - name: DataLayer ecommerce-clearing test
         run: php tests/datalayer-ecommerce-clear-test.php
 
+      - name: First-party data test (User-ID / UPD hashing)
+        run: php tests/first-party-data-test.php
+
   js-lint:
     runs-on: ubuntu-latest
     steps:

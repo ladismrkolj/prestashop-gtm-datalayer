@@ -103,6 +103,21 @@ class DbResultStub { public function execute($sql, $c = true) { return true; } p
 class Db { public static function getInstance($master = true) { return new DbResultStub(); } }
 
 class ObjectModelStub { public $id = null; }
+class Customer extends ObjectModelStub {
+    public $email = 'Test.User@Gmail.com'; public $firstname = 'Ada'; public $lastname = 'Lovelace';
+    public $newsletter = 1; public $id_default_group = 3;
+    public bool $logged = true;
+    public function __construct($id = null) { $this->id = (int) ($id ?: 7); }
+    public function isLogged($withGuest = false) { return $this->logged; }
+    public function getAddresses($idLang) { return [['id_address' => 55]]; }
+}
+class Group extends ObjectModelStub { public $name = 'Customer'; public function __construct($id = null, $idLang = null) { $this->id = (int) $id; } }
+class Country extends ObjectModelStub { public static function getIsoById($id) { return 'SI'; } }
+class Address extends ObjectModelStub {
+    public $firstname = 'Ada'; public $lastname = 'Lovelace'; public $city = 'Ljubljana';
+    public $postcode = '1000'; public $id_country = 1; public $phone = '01 234 5678'; public $phone_mobile = '';
+    public function __construct($id = null) { $this->id = (int) $id; }
+}
 class Product extends ObjectModelStub {
     public $reference = 'SKU-1'; public $name = 'Test Product'; public $id_manufacturer = 0; public $id_category_default = 0;
     public function __construct($id = null, $full = false, $idLang = null) { $this->id = (int) $id; }
@@ -123,7 +138,8 @@ class Cart extends ObjectModelStub {
     public function getCartRules() { return []; }
 }
 class Order extends ObjectModelStub {
-    public $reference = 'ABC'; public $id_cart = 1; public $id_lang = 1; public $id_currency = 1;
+    public $reference = 'ABC'; public $id_cart = 1; public $id_lang = 1; public $id_currency = 1; public $id_customer = 7;
+    public static function getCustomerNbOrders($idCustomer) { return 2; }
     public $total_paid_tax_incl = 24.0; public $total_paid_tax_excl = 20.0; public $total_shipping_tax_incl = 4.0;
     public array $rows = [];
     public function __construct($id = null) { $this->id = (int) $id; }
@@ -139,6 +155,7 @@ $ctx->currency = new Currency(1);
 $ctx->language = new class extends ObjectModelStub { public $id = 1; };
 $ctx->shop = new class extends ObjectModelStub { public $name = 'My Shop'; };
 $ctx->cart = null;
+$ctx->customer = new Customer(7);
 
 require_once __DIR__ . '/../ps_ga4_datalayer/ps_ga4_datalayer.php';
 
@@ -191,6 +208,8 @@ foreach ([false, true] as $injectionEnabled) {
         'PS_GTM_HEAD_SNIPPET' => $injectionEnabled ? '<script>/*gtm*/</script>' : '',
         'PS_GTM_BODY_SNIPPET' => $injectionEnabled ? '<noscript>x</noscript>' : '',
         'PS_ROOT_CATEGORY' => 1, 'PS_HOME_CATEGORY' => 2,
+        'PS_GTM_TRACK_USER_ID' => 1,
+        'PS_GTM_USER_PROVIDED_DATA' => 1,
     ];
 
     echo "\n=== injection " . ($injectionEnabled ? 'ENABLED' : 'DISABLED') . " ===\n";
@@ -261,6 +280,34 @@ $run('displayOrderConfirmation (repeat = dedup)', fn () => $m->hookDisplayOrderC
 $run('actionOrderSlipAdd', fn () => $m->hookActionOrderSlipAdd(['order' => $order, 'qtyList' => [77 => 1], 'productList' => [77 => ['quantity' => 1]]]));
 $run('actionAuthentication', fn () => $m->hookActionAuthentication([]));
 $run('actionCustomerAccountAdd', fn () => $m->hookActionCustomerAccountAdd([]));
+
+/* First-party data must actually reach the template, not just not-crash. */
+echo "\n=== first-party data reaches the template ===\n";
+$ctx->controller = new StubController('index');
+$ctx->smarty = new StubSmarty();
+$ctx->cart = null;
+$m = new Ps_ga4_datalayer();
+$run('displayHeader with User-ID + UPD enabled', fn () => $m->hookDisplayHeader([]), true);
+$hasUser = $ctx->smarty->getTemplateVars('ga4_has_user_payload');
+if ($hasUser === true) {
+    printf("  %-52s OK\n", 'user payload assigned to the template');
+} else {
+    $failures[] = 'user payload was not assigned (got ' . var_export($hasUser, true) . ')';
+    printf("  %-52s FAIL\n", 'user payload assigned to the template');
+}
+$decoded = json_decode(base64_decode((string) $ctx->smarty->getTemplateVars('ga4_user_b64')), true);
+if (is_array($decoded) && ($decoded['user_id'] ?? null) === '7' && isset($decoded['user_data']['sha256_email_address'])) {
+    printf("  %-52s OK\n", 'payload carries user_id + hashed user_data');
+} else {
+    $failures[] = 'user payload contents wrong: ' . json_encode($decoded);
+    printf("  %-52s FAIL\n", 'payload carries user_id + hashed user_data');
+}
+if (is_array($decoded) && strpos(json_encode($decoded), '@') === false) {
+    printf("  %-52s OK\n", 'no raw email anywhere in the pushed payload');
+} else {
+    $failures[] = 'raw email leaked into the dataLayer payload';
+    printf("  %-52s FAIL\n", 'no raw email anywhere in the pushed payload');
+}
 
 echo "\n============================================\n";
 if ($failures === []) {
