@@ -1,0 +1,116 @@
+# Disposable PrestaShop dev store for this module. How to use: ../README.md, section "Development".
+# The module lives in ../ps_ga4_datalayer (repo root holds docs, CI and tests).
+name: ${MODULE}-dev
+
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWD}
+      MYSQL_DATABASE: prestashop
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${DB_PASSWD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  prestashop:
+    image: prestashop/prestashop:${PS_IMAGE_TAG}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${HOST_PORT}:80"
+    environment:
+      DB_SERVER: db
+      DB_NAME: prestashop
+      DB_USER: root
+      DB_PASSWD: ${DB_PASSWD}
+      PS_DOMAIN: localhost:${HOST_PORT}
+      PS_INSTALL_AUTO: 1
+      PS_LANGUAGE: en
+      PS_COUNTRY: si
+      PS_FOLDER_ADMIN: admin-dev
+      PS_DEV_MODE: 1
+      ADMIN_MAIL: ${ADMIN_MAIL}
+      ADMIN_PASSWD: ${ADMIN_PASSWD}
+    volumes:
+      - ps_data:/var/www/html
+      - ../${MODULE}:/var/www/html/modules/${MODULE}
+      # Production vendor/ (--no-dev, store PHP) built by the `composer` service.
+      - module_vendor:/var/www/html/modules/${MODULE}/vendor
+
+  composer:
+    profiles: [tools]
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM composer:2 AS composer
+        FROM prestashop/prestashop:${PS_IMAGE_TAG}
+        COPY --from=composer /usr/bin/composer /usr/local/bin/composer
+    entrypoint: [composer]
+    working_dir: /app
+    environment:
+      COMPOSER_ALLOW_SUPERUSER: 1
+    volumes:
+      - ../${MODULE}:/app
+      - module_vendor:/app/vendor
+
+  # Same checks as .github/workflows/lint.yml (stub-based PHP tests + JS tests).
+  php-tests:
+    profiles: [tools]
+    image: php:${TEST_PHP}-cli
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    working_dir: /app
+    volumes:
+      - ../:/app
+    entrypoint: [sh, -ec]
+    command:
+      - |
+        find ${MODULE} -name '*.php' -not -path '*/vendor/*' -print0 | xargs -0 -n1 php -l >/dev/null
+        for t in tests/*.php; do echo "== $$t"; php "$$t"; done
+
+  js-tests:
+    profiles: [tools]
+    image: node:20-alpine
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    working_dir: /app
+    volumes:
+      - ../:/app
+    entrypoint: [sh, -ec]
+    command:
+      - |
+        node --check ${MODULE}/views/js/front.js
+        for t in tests/*.js; do echo "== $$t"; node "$$t"; done
+
+  # Browser checks of every dataLayer event against the running store: `docker compose run --rm e2e`.
+  e2e:
+    profiles: [tools]
+    image: mcr.microsoft.com/playwright:v1.65.1-noble
+    # Host network: the shop only answers on its PS_DOMAIN (localhost:${HOST_PORT}).
+    network_mode: host
+    working_dir: /e2e
+    environment:
+      SHOP_URL: http://localhost:${HOST_PORT}
+      ADMIN_MAIL: ${ADMIN_MAIL}
+      ADMIN_PASSWD: ${ADMIN_PASSWD}
+      npm_config_cache: /tmp/npm
+    volumes:
+      - ./e2e:/e2e
+      - e2e_node_modules:/e2e/node_modules
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        [ -d node_modules/playwright ] || npm install --no-save --no-audit --no-fund playwright@1.65.1 >/dev/null
+        exec node "$$@"
+      - e2e
+    command: [events.mjs]
+
+volumes:
+  db_data:
+  ps_data:
+  module_vendor:
+  e2e_node_modules:

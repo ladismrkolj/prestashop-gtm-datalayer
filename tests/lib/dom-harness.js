@@ -184,9 +184,9 @@ function buildEnvironment() {
       visibility: el && el._visible ? 'visible' : 'hidden',
     }),
     psGa4Config: { currency: 'EUR', trackPromotions: true, trackEngagement: true },
-    psGa4ListItems: {},
-    psGa4CurrentItem: null,
+    psGa4Page: { listItems: {}, currentItem: null, idProductAttribute: 0, variants: {} },
     prestashop: {
+      cart: { products: [] },
       on(evt, cb) { (psHandlers[evt] = psHandlers[evt] || []).push(cb); },
       emit(evt, data) { (psHandlers[evt] || []).forEach((cb) => cb(data)); },
     },
@@ -208,18 +208,6 @@ function buildEnvironment() {
 
   return { win, document, wishlistBus };
 }
-
-function loadFrontJs(env) {
-  const src = fs.readFileSync(
-    path.join(__dirname, '..', 'ps_ga4_datalayer', 'views', 'js', 'front.js'),
-    'utf8'
-  );
-  const ctx = vm.createContext(
-    Object.assign(env.win, { console, Object, Array, String, Number, Math, JSON, parseFloat, parseInt, isNaN, WeakSet, Date })
-  );
-  vm.runInContext(src, ctx);
-}
-
 
 function loadFrontJs(env) {
   const src = fs.readFileSync(

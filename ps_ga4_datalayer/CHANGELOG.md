@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.2.0
+
+Verified end-to-end in a real PrestaShop 9.2 store (Hummingbird and
+Classic themes) with a browser test that records every dataLayer push
+(`local-dev/e2e/events.mjs`). Most of the fixes below were invisible to
+the stub-based unit tests.
+
+**Storefront output moved to `displayAfterBodyOpeningTag`** (the upgrade
+unregisters `displayHeader`). PrestaShop computes `displayHeader` inside
+`FrontController::initContent()`, before listing pages assign their
+products and also on requests that only redirect. As a result:
+
+- `view_item_list` never fired on category, brand, supplier or search
+  pages, and `select_item`, quick-view `view_item` and listing
+  `add_to_cart` had no product data.
+- `login` was lost: the flag was consumed while the login POST built its
+  header and then redirected.
+- The GTM loader is now printed at the start of `<body>`, so the
+  `gtag('consent', 'default', ...)` a cookie banner prints in `<head>`
+  always comes first, whatever the module hook order. Consent Mode v2
+  works with any banner module without configuration.
+
+Event fixes:
+
+- Non-ASCII text (`č`, `ž`, `–`, ...) was garbled in every event:
+  payloads are now printed as escaped JSON instead of base64 decoded
+  with `atob()`.
+- Listing rows are core `ProductListingLazyArray` objects, not arrays;
+  they were skipped entirely.
+- `begin_checkout` never fired (PrestaShop 9's checkout page is named
+  `checkout`, not `order`) and now fires once per cart, not once per
+  checkout step. `add_shipping_info` / `add_payment_info` now carry the
+  cart items.
+- `add_to_cart` / `remove_from_cart` are derived from the cart contents
+  before and after each `updateCart`: correct quantity (was always 1),
+  price and selected variant; cart page +/- buttons are now tracked;
+  Hummingbird's delete (no cart in its response) works.
+- `view_item_variants` fires only when the combination changes (not on
+  quantity changes) and carries the variant's label and price.
+- `add_shipping_info` fires when the delivery step is submitted, also
+  when the preselected carrier is kept. `add_payment_info` no longer
+  fires on every checkout page load.
+- Quick view, share, out-of-stock alert, newsletter and review events
+  now also match Hummingbird's markup and events; the newsletter also
+  covers Classic's AJAX subscription.
+- `view_promotion` / `select_promotion` put their fields inside
+  `ecommerce` with an `items` entry, as GA4 requires, and pick up the
+  image slider's slides with a readable name.
+- `apply_voucher` now carries the coupon code.
+- AJAX listing updates (faceted search, pagination) push a fresh
+  `view_item_list`.
+- `purchase` / `refund` use the catalog product name with the
+  combination in `item_variant` (was "Name (Size: S - Color: White)"),
+  and a cart split into several orders is reported as one purchase with
+  the combined value. The bogus item `discount` (refunded amount) is
+  gone.
+- Numbers are encoded as `23.33`, not `23.329999999999998`, on hosts
+  with `serialize_precision = 17`.
+
+After upgrading, clear the cache (Advanced Parameters > Performance) so
+a combined JS bundle (CCC) doesn't keep serving the old `front.js`.
+
 ## 1.1.0
 
 Adds GA4 first-party data - the "Add first-party data" checklist in GA4

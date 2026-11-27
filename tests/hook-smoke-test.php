@@ -11,7 +11,7 @@
  * `php -l` only proves a file parses. It cannot catch a call to a method
  * that doesn't exist in PrestaShop 9 (e.g. `Tools::jsonEncode()`, removed
  * in the 1.7 -> 9 cleanup). That is a fatal Error at runtime, and because
- * PrestaShop renders inside an output buffer, a fatal in `displayHeader`
+ * PrestaShop renders inside an output buffer, a fatal in a display hook
  * discards the buffer: the visitor gets a completely blank page with empty
  * source. That shipped once - hence this test.
  *
@@ -22,8 +22,8 @@
  *     instead of "no website" - which means checking only for absence-of-
  *     fatal would happily pass on a totally broken module. Anything
  *     reaching the logger fails the run.
- *  3. `displayHeader` returns non-empty markup, since it must always emit
- *     the dataLayer bootstrap regardless of the injection toggle.
+ *  3. `displayAfterBodyOpeningTag` returns non-empty markup, since it must
+ *     always emit the dataLayer bootstrap regardless of the injection toggle.
  *
  * Exits non-zero on failure so CI fails loudly.
  */
@@ -99,7 +99,12 @@ class Tools {
 class Media { public static array $defs = []; public static function addJsDef($d) { self::$defs = array_merge(self::$defs, $d); } }
 class PrestaShopLogger { public static array $logs = []; public static function addLog($m, $sev = 1, $ec = null, $ot = null, $oi = null, $dup = false, $emp = null) { self::$logs[] = "[$sev] $m"; } }
 
-class DbResultStub { public function execute($sql, $c = true) { return true; } public function getRow($sql, $c = true) { return false; } }
+class DbResultStub {
+    public function execute($sql, $c = true) { return true; }
+    public function getRow($sql, $c = true) { return false; }
+    /** Combination labels query (GA4DataLayerFormatter::variantLabels). */
+    public function executeS($sql, $a = true, $c = true) { return [['id_product_attribute' => 42, 'name' => 'Red'], ['id_product_attribute' => 42, 'name' => 'L']]; }
+}
 class Db { public static function getInstance($master = true) { return new DbResultStub(); } }
 
 class ObjectModelStub { public $id = null; }
@@ -122,15 +127,11 @@ class Product extends ObjectModelStub {
     public $reference = 'SKU-1'; public $name = 'Test Product'; public $id_manufacturer = 0; public $id_category_default = 0;
     public function __construct($id = null, $full = false, $idLang = null) { $this->id = (int) $id; }
     public static function getPriceStatic($id, $tax = true, $ipa = null, $dec = 6) { return 19.99; }
+    public static function getProductName($id, $ipa = null, $idLang = null) { return 'Test Product'; }
 }
 class Category extends ObjectModelStub { public $name = 'Cat'; public $id_parent = 0; public function __construct($id = null, $idLang = null) { $this->id = (int) $id; } }
 class Manufacturer extends ObjectModelStub { public static function getNameById($id) { return 'Brand'; } }
 class Currency extends ObjectModelStub { public $iso_code = 'EUR'; public function __construct($id = null) { $this->id = (int) $id; } }
-class Combination extends ObjectModelStub {
-    public $id_product = 5;
-    public function __construct($id = null) { $this->id = (int) $id; }
-    public function getAttributesName($idLang) { return [['name' => 'Red']]; }
-}
 class Cart extends ObjectModelStub {
     public array $rows = [];
     public function __construct($id = null) { $this->id = (int) $id; }
@@ -140,6 +141,7 @@ class Cart extends ObjectModelStub {
 class Order extends ObjectModelStub {
     public $reference = 'ABC'; public $id_cart = 1; public $id_lang = 1; public $id_currency = 1; public $id_customer = 7;
     public static function getCustomerNbOrders($idCustomer) { return 2; }
+    public static function getByReference($reference) { return []; }
     public $total_paid_tax_incl = 24.0; public $total_paid_tax_excl = 20.0; public $total_shipping_tax_incl = 4.0;
     public array $rows = [];
     public function __construct($id = null) { $this->id = (int) $id; }
@@ -198,7 +200,7 @@ $run = function (string $label, callable $fn, bool $expectOutput = false) use (&
     printf("  %-52s OK%s\n", $label, $hasOutput ? ' (output)' : '');
 };
 
-$pages = ['index', 'category', 'manufacturer', 'supplier', 'search', 'product', 'cart', 'order', 'authentication'];
+$pages = ['index', 'category', 'manufacturer', 'supplier', 'search', 'product', 'cart', 'checkout', 'authentication'];
 
 foreach ([false, true] as $injectionEnabled) {
     Configuration::$store = [
@@ -233,7 +235,7 @@ foreach ([false, true] as $injectionEnabled) {
             // is genuinely exercised, not short-circuited.
             $ctx->smarty->assign('product', ['id_product' => 5, 'price_amount' => 19.99, 'id_product_attribute' => 42]);
         }
-        if (in_array($page, ['cart', 'order'], true)) {
+        if (in_array($page, ['cart', 'checkout'], true)) {
             $cart = new Cart(1);
             $cart->rows = [['id_product' => 5, 'name' => 'P', 'price_wt' => 9.99, 'cart_quantity' => 2, 'id_category_default' => 3, 'id_product_attribute' => 42]];
             $ctx->cart = $cart;
@@ -243,8 +245,7 @@ foreach ([false, true] as $injectionEnabled) {
 
         $m = new Ps_ga4_datalayer();
         $run("[$page] actionFrontControllerSetMedia", fn () => $m->hookActionFrontControllerSetMedia([]));
-        $run("[$page] displayHeader", fn () => $m->hookDisplayHeader([]), true);
-        $run("[$page] displayAfterBodyOpeningTag", fn () => $m->hookDisplayAfterBodyOpeningTag([]));
+        $run("[$page] displayAfterBodyOpeningTag", fn () => $m->hookDisplayAfterBodyOpeningTag([]), true);
     }
 }
 
@@ -256,7 +257,7 @@ $badCart = new Cart(1);
 $badCart->rows = ['not-an-array', null, false, 42, ['id_product' => 5, 'price_wt' => 1.0, 'cart_quantity' => 1]];
 $ctx->cart = $badCart;
 $m = new Ps_ga4_datalayer();
-$run('[cart] displayHeader w/ non-array cart rows', fn () => $m->hookDisplayHeader([]));
+$run('[cart] displayAfterBodyOpeningTag w/ non-array cart rows', fn () => $m->hookDisplayAfterBodyOpeningTag([]));
 $run('[cart] setMedia w/ non-array cart rows', fn () => $m->hookActionFrontControllerSetMedia([]));
 
 $ctx->controller = new StubController('category');
@@ -264,11 +265,11 @@ $ctx->smarty = new StubSmarty();
 $ctx->smarty->assign('listing', ['products' => 'totally-not-a-list']);
 $ctx->cart = null;
 $m = new Ps_ga4_datalayer();
-$run('[category] displayHeader w/ scalar listing.products', fn () => $m->hookDisplayHeader([]));
+$run('[category] displayAfterBodyOpeningTag w/ scalar listing.products', fn () => $m->hookDisplayAfterBodyOpeningTag([]));
 
 $ctx->smarty->assign('listing', ['products' => ['x', 7, null]]);
 $m = new Ps_ga4_datalayer();
-$run('[category] displayHeader w/ scalar product rows', fn () => $m->hookDisplayHeader([]));
+$run('[category] displayAfterBodyOpeningTag w/ scalar product rows', fn () => $m->hookDisplayAfterBodyOpeningTag([]));
 
 // Order confirmation + refund
 $ctx->controller = new StubController('order-confirmation');
@@ -287,15 +288,9 @@ $ctx->controller = new StubController('index');
 $ctx->smarty = new StubSmarty();
 $ctx->cart = null;
 $m = new Ps_ga4_datalayer();
-$run('displayHeader with User-ID + UPD enabled', fn () => $m->hookDisplayHeader([]), true);
-$hasUser = $ctx->smarty->getTemplateVars('ga4_has_user_payload');
-if ($hasUser === true) {
-    printf("  %-52s OK\n", 'user payload assigned to the template');
-} else {
-    $failures[] = 'user payload was not assigned (got ' . var_export($hasUser, true) . ')';
-    printf("  %-52s FAIL\n", 'user payload assigned to the template');
-}
-$decoded = json_decode(base64_decode((string) $ctx->smarty->getTemplateVars('ga4_user_b64')), true);
+$run('displayAfterBodyOpeningTag with User-ID + UPD enabled', fn () => $m->hookDisplayAfterBodyOpeningTag([]), true);
+$pushes = json_decode((string) $ctx->smarty->getTemplateVars('ga4_pushes_json'), true);
+$decoded = is_array($pushes) ? ($pushes[0] ?? null) : null;
 if (is_array($decoded) && ($decoded['user_id'] ?? null) === '7' && isset($decoded['user_data']['sha256_email_address'])) {
     printf("  %-52s OK\n", 'payload carries user_id + hashed user_data');
 } else {
