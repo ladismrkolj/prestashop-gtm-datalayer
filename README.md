@@ -24,7 +24,9 @@ installation, configuration, architecture and testing instructions.
 ```
 .
 ├── ps_ga4_datalayer/     The PrestaShop module (install this folder)
-└── .github/workflows/    CI: PHP/JS syntax linting across PHP 8.1-8.4
+├── tests/                Fast unit tests (PHP stubs, node), run in CI
+├── local-dev/            Disposable Docker store + browser test of every event
+└── .github/workflows/    CI: PHP/JS syntax linting + unit tests across PHP 8.1-8.4
 ```
 
 ## Getting started
@@ -32,3 +34,25 @@ installation, configuration, architecture and testing instructions.
 See [`ps_ga4_datalayer/README.md`](./ps_ga4_datalayer/README.md) for
 installation, Back Office configuration, and testing instructions
 (Google Tag Assistant, GA4 DebugView, `window.dataLayer` console checks).
+
+## Development
+
+Needs only Docker. From `local-dev/`:
+
+```sh
+cp .env.example .env
+docker compose up -d                     # PrestaShop 9.2 + MySQL; first boot installs the shop (minutes)
+docker compose logs -f prestashop        # 9.2 images exit once after installing: run `up -d` again
+./seed.sh                                # installs the module + ConsentFlow banner, test data
+```
+
+The shop runs at http://localhost:8080/ (back office `/admin-dev/`,
+credentials in `.env`); `ps_ga4_datalayer/` is mounted live into it.
+
+- `docker compose run --rm php-tests` / `js-tests` - the CI unit tests.
+- `docker compose run --rm e2e` - drives a real browser (Playwright)
+  through the store and checks every dataLayer event: consent ordering,
+  listings, quick view, variants, cart, voucher, wishlist, review,
+  newsletter, stock alert, sign-up, login and a full checkout to
+  `purchase`. Needs a store prepared by `./seed.sh`.
+- `docker compose down -v` deletes the store completely.

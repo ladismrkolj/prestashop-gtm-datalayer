@@ -84,7 +84,6 @@ class Ps_ga4_datalayer extends Module
     ];
 
     private const HOOKS = [
-        'displayHeader',
         'displayAfterBodyOpeningTag',
         'displayOrderConfirmation',
         'actionFrontControllerSetMedia',
@@ -97,6 +96,7 @@ class Ps_ga4_datalayer extends Module
     private const COOKIE_LOGIN_PENDING = 'ga4_login_pending';
     private const COOKIE_SIGNUP_PENDING = 'ga4_signup_pending';
     private const COOKIE_ORDER_PREFIX = 'ps_ga4_order_';
+    private const COOKIE_CHECKOUT_STARTED = 'ga4_checkout_started';
 
     private ?GA4DataLayerFormatter $formatter = null;
 
@@ -111,11 +111,17 @@ class Ps_ga4_datalayer extends Module
     /** @var array<string, mixed>|null The current product-page GA4 item, populated while building view_item. */
     private ?array $lastCurrentItem = null;
 
+    /** Combination shown when the product page loaded (0 = none). */
+    private int $currentProductAttributeId = 0;
+
+    /** @var array<int, array{item_variant: string, price: float}> id_product_attribute => variant data for the current product. */
+    private array $currentVariants = [];
+
     public function __construct()
     {
         $this->name = 'ps_ga4_datalayer';
         $this->tab = 'analytics_stats';
-        $this->version = '1.1.0';
+        $this->version = '1.2.0';
         $this->author = 'ladismrkolj';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -311,7 +317,7 @@ class Ps_ga4_datalayer extends Module
                         'type' => 'textarea',
                         'label' => $this->l('Head snippet'),
                         'name' => self::CONFIG_HEAD_SNIPPET,
-                        'desc' => $this->l('Paste the raw Google Tag Manager <script> snippet Google gives you for the <head> section. Output verbatim, right after the dataLayer is initialised.'),
+                        'desc' => $this->l('Paste the raw Google Tag Manager <script> snippet Google gives you for the <head> section. It is output verbatim at the start of <body>, after the page dataLayer pushes - so the consent defaults your cookie banner sets in <head> always load before GTM.'),
                         'rows' => 8,
                         'cols' => 80,
                         'autoload_rte' => false,
@@ -500,7 +506,7 @@ class Ps_ga4_datalayer extends Module
             }
         }
 
-        if (in_array($pageName, ['cart', 'order'], true) && $this->context->cart && $this->context->cart->id) {
+        if (in_array($pageName, ['cart', 'checkout'], true) && $this->context->cart && $this->context->cart->id) {
             $config['cart'] = $this->getFormatter()->cartPayload($this->context->cart);
         }
 
@@ -508,37 +514,20 @@ class Ps_ga4_datalayer extends Module
     }
 
     /* ==================================================================
-     *  Snippet injection (hookDisplayHeader / hookDisplayAfterBodyOpeningTag)
+     *  Page output (hookDisplayAfterBodyOpeningTag)
+     *
+     *  Everything the storefront needs is printed here, at the start of
+     *  <body>, and not in displayHeader:
+     *   - PrestaShop computes displayHeader inside
+     *     FrontController::initContent(), BEFORE listing controllers assign
+     *     `listing`, and also on requests that only redirect (the login
+     *     POST). This hook is called by the layout template itself, so it
+     *     runs only for pages that are actually shown, once every template
+     *     variable exists.
+     *   - Consent banners print `gtag('consent', 'default', ...)` in
+     *     <head>. Loading GTM here queues those defaults before gtm.js
+     *     regardless of module hook order.
      * ================================================================== */
-
-    public function hookDisplayHeader(array $params = []): string
-    {
-        return $this->safelyRender(fn (): string => $this->doDisplayHeader(), 'hookDisplayHeader');
-    }
-
-    private function doDisplayHeader(): string
-    {
-        $events = $this->buildPageLoadEvents();
-
-        // The same items just used for view_item_list / view_item are also
-        // exposed to front.js so client-driven events (select_item,
-        // add_to_wishlist, add_to_cart, ...) don't need to re-fetch product
-        // data: window.psGa4ListItems (keyed by id_product) and
-        // window.psGa4CurrentItem (single product-page item).
-        $userPayload = $this->buildUserPayload();
-
-        $this->context->smarty->assign([
-            'ga4_enable_injection' => $this->configBool(self::CONFIG_ENABLE_INJECTION),
-            'ga4_head_snippet' => (string) Configuration::get(self::CONFIG_HEAD_SNIPPET),
-            'ga4_events_b64' => $this->jsonToBase64(array_values($events)),
-            'ga4_list_items_b64' => $this->jsonToBase64($this->lastListItemsMap),
-            'ga4_current_item_b64' => $this->jsonToBase64($this->lastCurrentItem),
-            'ga4_has_user_payload' => $userPayload !== [],
-            'ga4_user_b64' => $this->jsonToBase64($userPayload),
-        ]);
-
-        return $this->fetch('module:' . $this->name . '/views/templates/hook/header.tpl');
-    }
 
     public function hookDisplayAfterBodyOpeningTag(array $params = []): string
     {
@@ -547,16 +536,30 @@ class Ps_ga4_datalayer extends Module
 
     private function doDisplayAfterBodyOpeningTag(): string
     {
-        if (!$this->configBool(self::CONFIG_ENABLE_INJECTION)) {
-            return '';
+        $pushes = $this->buildPageLoadEvents();
+
+        // First-party data goes first so GA4 attributes every event of the
+        // page to the identified user.
+        $userPayload = $this->buildUserPayload();
+        if ($userPayload !== []) {
+            array_unshift($pushes, $userPayload);
         }
 
-        $snippet = (string) Configuration::get(self::CONFIG_BODY_SNIPPET);
-        if (trim($snippet) === '') {
-            return '';
-        }
+        $injection = $this->configBool(self::CONFIG_ENABLE_INJECTION);
 
-        $this->context->smarty->assign('ga4_body_snippet', $snippet);
+        $this->context->smarty->assign([
+            'ga4_body_snippet' => $injection ? (string) Configuration::get(self::CONFIG_BODY_SNIPPET) : '',
+            'ga4_head_snippet' => $injection ? (string) Configuration::get(self::CONFIG_HEAD_SNIPPET) : '',
+            'ga4_pushes_json' => $this->jsonForScript($pushes),
+            // Product data front.js reuses for click-driven events
+            // (select_item, quick view, view_item_variants, wishlist...).
+            'ga4_page_json' => $this->jsonForScript([
+                'listItems' => $this->lastListItemsMap ?: new stdClass(),
+                'currentItem' => $this->lastCurrentItem,
+                'idProductAttribute' => $this->currentProductAttributeId,
+                'variants' => $this->currentVariants ?: new stdClass(),
+            ]),
+        ]);
 
         return $this->fetch('module:' . $this->name . '/views/templates/hook/body_open.tpl');
     }
@@ -592,7 +595,7 @@ class Ps_ga4_datalayer extends Module
                 $events[] = $this->buildViewCartEvent();
                 break;
 
-            case 'order':
+            case 'checkout':
                 $events[] = $this->buildBeginCheckoutEvent();
                 break;
         }
@@ -636,7 +639,7 @@ class Ps_ga4_datalayer extends Module
         }
 
         foreach (array_values($products) as $index => $row) {
-            if (!is_array($row) || !isset($payload['items'][$index])) {
+            if ((!is_array($row) && !$row instanceof ArrayAccess) || !isset($payload['items'][$index])) {
                 continue;
             }
             $idProduct = (int) $this->extractId($row, ['id_product', 'id']);
@@ -701,7 +704,7 @@ class Ps_ga4_datalayer extends Module
     private function extractField(mixed $subject, array $keys): mixed
     {
         foreach ($keys as $key) {
-            if (is_array($subject) && isset($subject[$key])) {
+            if ((is_array($subject) || $subject instanceof ArrayAccess) && isset($subject[$key])) {
                 return $subject[$key];
             }
             if (is_object($subject) && isset($subject->{$key})) {
@@ -739,6 +742,8 @@ class Ps_ga4_datalayer extends Module
         ]);
 
         $this->lastCurrentItem = $item;
+        $this->currentProductAttributeId = $idProductAttribute;
+        $this->currentVariants = $formatter->variantsForProduct($idProduct);
 
         return [
             'event' => 'view_item',
@@ -776,6 +781,18 @@ class Ps_ga4_datalayer extends Module
         if (empty($payload['items'])) {
             return null;
         }
+
+        // Every checkout step reloads the order page: send begin_checkout
+        // once per cart content, not once per step.
+        $signature = (int) $cart->id . ':' . md5((string) json_encode(array_map(
+            static fn (array $item): array => [$item['item_id'] ?? '', $item['item_variant'] ?? '', $item['quantity'] ?? 1],
+            $payload['items']
+        )));
+        if ((string) $this->context->cookie->{self::COOKIE_CHECKOUT_STARTED} === $signature) {
+            return null;
+        }
+        $this->context->cookie->{self::COOKIE_CHECKOUT_STARTED} = $signature;
+        $this->context->cookie->write();
 
         return ['event' => 'begin_checkout', 'ecommerce' => $payload];
     }
@@ -856,7 +873,7 @@ class Ps_ga4_datalayer extends Module
 
         $this->persistClientIdForOrder((int) $order->id);
 
-        $this->context->smarty->assign('ga4_purchase_b64', $this->jsonToBase64([
+        $this->context->smarty->assign('ga4_purchase_json', $this->jsonForScript([
             'event' => 'purchase',
             'ecommerce' => $payload,
         ]));
@@ -1053,7 +1070,7 @@ class Ps_ga4_datalayer extends Module
             $envelope['user_id'] = $userId;
         }
 
-        $body = json_encode($envelope, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $body = $this->encodeJson($envelope, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         if ($body === false) {
             return false;
@@ -1137,23 +1154,35 @@ class Ps_ga4_datalayer extends Module
     }
 
     /**
-     * Base64-encodes a JSON payload for safe embedding inside an inline
-     * <script> tag, decoded client-side with `JSON.parse(atob(...))`. The
-     * base64 alphabet cannot contain `<`, `/`, quotes or backslashes, so -
-     * unlike escaping `</script>` by hand - this is immune to script-tag
-     * breakout by construction, regardless of what a product name, search
-     * term or category label happens to contain.
+     * JSON safe to print inside an inline <script>: `<`, `>`, `&` and quotes
+     * are \u-escaped, so no product name, search term or category label can
+     * close the tag or open a comment. UTF-8 text stays as-is.
      */
-    private function jsonToBase64(mixed $data): string
+    private function jsonForScript(mixed $data): string
     {
-        // NOTE: plain json_encode(), not Tools::jsonEncode() - the latter
-        // existed in older PrestaShop branches but was removed and does NOT
-        // exist in PrestaShop 9. Calling it is a fatal Error, not a
-        // catchable Exception, and since this runs on every page load it
-        // blanks the entire storefront.
-        $json = json_encode($data, JSON_UNESCAPED_UNICODE);
+        $json = $this->encodeJson(
+            $data,
+            JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+            | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE
+        );
 
-        return base64_encode($json === false ? 'null' : $json);
+        return $json === false ? 'null' : $json;
+    }
+
+    /**
+     * json_encode() with the shortest round-trip float format, so 23.33 is
+     * sent as 23.33 and not 23.329999999999998 on hosts whose php.ini sets
+     * serialize_precision = 17.
+     */
+    private function encodeJson(mixed $data, int $flags): string|false
+    {
+        $precision = ini_get('serialize_precision');
+        ini_set('serialize_precision', '-1');
+        try {
+            return json_encode($data, $flags);
+        } finally {
+            ini_set('serialize_precision', (string) $precision);
+        }
     }
 
     private function getFormatter(): GA4DataLayerFormatter

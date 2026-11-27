@@ -40,7 +40,7 @@ Manager → Configure**:
 | Field | Purpose |
 |---|---|
 | **Enable snippet injection** | Master on/off switch for both snippets below. |
-| **Head snippet** | Paste Google's raw `<script>...</script>` GTM snippet for `<head>`. |
+| **Head snippet** | Paste Google's raw `<script>...</script>` GTM snippet meant for `<head>`. The module prints it at the start of `<body>` - see [Consent Mode v2](#consent-mode-v2). |
 | **Body snippet** | Paste Google's raw `<noscript>...</noscript>` GTM snippet for right after `<body>`. |
 | **Track promotions** | Enables `view_promotion` / `select_promotion`. |
 | **Track engagement** | Enables `search`, `login`, `sign_up`, `share`. |
@@ -61,18 +61,18 @@ exactly as pasted either way.
 
 | # | Event | Trigger |
 |---|---|---|
-| 1 | `view_item_list` | Category, brand, supplier & search result pages (server-rendered) |
-| 2 | `select_item` | Click on a product card in a list/grid |
-| 3 | `view_item` | Product page load, and Quick View (`clickQuickView`, whose payload is a DOM element) |
-| 4 | `add_to_cart` | `prestashop.on('updateCart')` with `reason.linkAction === 'add-to-cart'` |
-| 5 | `remove_from_cart` | `updateCart` with `reason.linkAction === 'delete-from-cart'` |
+| 1 | `view_item_list` | Category, brand, supplier & search result pages (server-rendered); again after AJAX filtering/paging (`updateProductList`) |
+| 2 | `select_item` | Click on a product card link in a list/grid |
+| 3 | `view_item` | Product page load, and Quick View (`clickQuickView` in Classic, `clickQuickview` in Hummingbird) |
+| 4 | `add_to_cart` | Any `updateCart` whose cart has more of a line than before: product page, quick view, listing button, cart `+` |
+| 5 | `remove_from_cart` | Any `updateCart` whose cart has less of a line: cart delete, cart `-` |
 | 6 | `view_cart` | `/cart` page load |
-| 7 | `begin_checkout` | Entering the `order` (checkout) controller |
-| 8 | `add_shipping_info` | `prestashop.on('updatedDeliveryForm')` |
-| 9 | `add_payment_info` | Payment option selection / `prestashop.on('termsUpdated')` |
-| 10 | `purchase` | `hookDisplayOrderConfirmation`, deduplicated per order |
-| 11 | `view_promotion` | Banner/slide with `data-ga4-promotion-id` enters the viewport |
-| 12 | `select_promotion` | Click on that same banner/slide |
+| 7 | `begin_checkout` | Entering checkout, once per cart content (not on every checkout step) |
+| 8 | `add_shipping_info` | Delivery step submitted |
+| 9 | `add_payment_info` | Payment option selected |
+| 10 | `purchase` | `hookDisplayOrderConfirmation`, deduplicated per order; orders split by carrier are one purchase |
+| 11 | `view_promotion` | Image-slider slide, or any element with `data-ga4-promotion-id`, enters the viewport |
+| 12 | `select_promotion` | Click on that same slide/element |
 
 ### B. Extended eCommerce (3)
 
@@ -80,7 +80,7 @@ exactly as pasted either way.
 |---|---|---|
 | 13 | `add_to_wishlist` | Confirmed add via `blockwishlist`'s `addedToWishlist` event (falls back to click for other wishlist modules) |
 | 14 | `refund` | `hookActionOrderSlipAdd` (credit slip), sent server-to-server via GA4 Measurement Protocol |
-| 15 | `view_item_variants` | `updatedProduct` (the completion event) on combination change |
+| 15 | `view_item_variants` | `updatedProduct` when the combination changes (quantity changes are ignored) |
 
 ### C. Store engagement (4)
 
@@ -95,10 +95,10 @@ exactly as pasted either way.
 
 | # | Event | Trigger |
 |---|---|---|
-| 20 | `apply_voucher` | Promo code applied (`data-link-action="add-voucher"`) |
-| 21 | `out_of_stock_alert` | `ps_emailalerts` button click, once the AJAX success message renders |
-| 22 | `newsletter_signup` | `ps_emailsubscription` success notice detected on page load (it posts with a full reload) |
-| 23 | `review_submitted` | `productcomments` confirmation modal opens |
+| 20 | `apply_voucher` | Promo code applied (`updateCart` with `linkAction` `add-voucher`), with the code |
+| 21 | `out_of_stock_alert` | `ps_emailalerts` subscribe button, once its success message renders |
+| 22 | `newsletter_signup` | `ps_emailsubscription` success message: after Hummingbird's page reload or Classic's AJAX reply |
+| 23 | `review_submitted` | `productcomments` "review posted" confirmation modal opens |
 
 ## First-party data (User-ID, UPD, Measurement Protocol)
 
@@ -183,11 +183,22 @@ your reported revenue.
 
 ### Consent Mode v2
 
-Not implemented here by design. If you run a consent banner module (e.g.
-*Google Tag Manager Consent Mode Banner*), that module owns the consent
-defaults, and a second module writing them would conflict. Make sure its
-`gtag('consent', 'default', …)` runs **before** the GTM container loads -
-see the note in *Data mapping notes & assumptions*.
+Use any cookie-banner module that supports Google Consent Mode v2 and
+prints its `gtag('consent', 'default', ...)` in `<head>` - e.g. the free,
+open-source [ConsentFlow](https://github.com/GajewskiMarcin/ConsentFlow)
+(enable it and its *Google Consent Mode v2* switch). Nothing else to
+configure:
+
+- This module prints the GTM loader at the start of `<body>`, so the
+  banner's consent defaults in `<head>` are always queued before `gtm.js`,
+  whatever order the modules are installed or hooked in.
+- The banner sends `gtag('consent', 'update', ...)` when the visitor
+  chooses; GTM's Google tags adjust by themselves. dataLayer events are
+  always pushed - consent decides what the tags do with them, which is
+  what Consent Mode is for.
+
+This module deliberately sets no consent state of its own: two modules
+writing consent defaults conflict.
 
 ## Architecture
 
@@ -195,33 +206,38 @@ see the note in *Data mapping notes & assumptions*.
 ps_ga4_datalayer/
 ├── ps_ga4_datalayer.php              Main module class (hooks, admin config, orchestration)
 ├── src/Service/
-│   └── GA4DataLayerFormatter.php     Product/Cart/Order/Combination -> clean GA4 arrays
-├── views/js/front.js                 prestashop.on() bus listener + DOM delegation
-├── views/templates/hook/             Inline <script> templates for header/body/purchase
+│   ├── GA4DataLayerFormatter.php     Product/Cart/Order -> clean GA4 arrays
+│   └── GA4UserDataBuilder.php        User-ID, user properties, hashed user data
+├── upgrade/                          Version upgrade scripts
+├── views/js/front.js                 Interaction events (PrestaShop event bus + DOM delegation)
+├── views/templates/hook/             Inline <script> templates (body start, purchase)
 ├── views/templates/admin/            Back Office info panel
 └── translations/                     Managed via Localization > Translations in the BO
 ```
 
 **Server-driven events** (`view_item_list`, `view_item`, `view_cart`,
-`begin_checkout`, `purchase`, `search`, `login`, `sign_up`) are computed in
-PHP and pushed via an inline `<script>` in `hookDisplayHeader`/
-`hookDisplayOrderConfirmation`, *before* the pasted GTM head snippet -
-matching Google's own recommendation to queue ecommerce data ahead of
-`gtm.js` loading.
+`begin_checkout`, `search`, `login`, `sign_up`) are computed in PHP and
+pushed from `hookDisplayAfterBodyOpeningTag`, followed by the GTM loader.
+That hook is called by the layout template, i.e. only for pages that are
+actually rendered and after every template variable exists.
+(`displayHeader` is not usable: PrestaShop builds it before listing pages
+assign their products, and also on requests that only redirect, such as
+the login POST.) `purchase` comes from `hookDisplayOrderConfirmation`.
 
 **Client-driven events** (everything interaction-based) are handled by
-`views/js/front.js`, registered through
-`$this->context->controller->registerJavascript()`. It listens to
-PrestaShop 9's native `prestashop.on()` bus (`updateCart`,
-`updatedDeliveryForm`, `termsUpdated`, `clickQuickView`, `updateProduct`)
-and falls back to DOM delegation for blocks the bus doesn't cover.
+`views/js/front.js`. Cart events come from one place: every `updateCart`
+on PrestaShop's event bus is diffed against the previous cart contents
+(`prestashop.cart` at page load, then each response's cart), which yields
+`add_to_cart` / `remove_from_cart` with real quantities, prices and
+variants from any button in any theme. The other events use the event bus
+(`clickQuickView`/`clickQuickview`, `updatedProduct`, `updateProductList`,
+blockwishlist's bus) or delegated DOM listeners with selectors for both
+Hummingbird and Classic.
 
-To avoid duplicate AJAX calls, `front.js` reads two small JSON bridges the
-PHP side already builds for the page-load events above:
-`window.psGa4ListItems` (id_product → GA4 item, from the current
-`view_item_list`) and `window.psGa4CurrentItem` (the current product page's
-item) - so `select_item`, `add_to_cart`, `add_to_wishlist`, etc. don't need
-to re-derive price/category/brand from the DOM.
+`front.js` reuses the product data PHP already built, exposed as
+`window.psGa4Page`: `listItems` (id_product → GA4 item of the current
+list), `currentItem` (product page item) and `variants`
+(id_product_attribute → label and price), so no extra AJAX is needed.
 
 ### Why `refund` needs GA4 Measurement ID/API secret
 
@@ -237,10 +253,11 @@ extra configuration).
 ## Customizing selectors
 
 Several client-side events (wishlist, newsletter, back-in-stock, reviews,
-promotions) depend on CSS selectors that vary between theme
-versions/overrides. Rather than editing `front.js`, override any selector
-by defining `window.ga4DataLayerSelectors` in your theme **before**
-`front.js` runs (e.g. from a `displayHeader` hook in your own theme/module):
+promotions, checkout labels) depend on CSS selectors. Both official
+PrestaShop 9 themes (Hummingbird and Classic) are covered out of the box.
+For a custom theme, override any key of `SELECTORS` in `front.js` by
+defining `window.ga4DataLayerSelectors` **before** `front.js` runs (e.g.
+from a `displayHeader` hook in your own theme/module):
 
 ```html
 <script>
@@ -250,9 +267,9 @@ by defining `window.ga4DataLayerSelectors` in your theme **before**
 </script>
 ```
 
-Homepage promotions (banners/slides) are opt-in by design - add
-`data-ga4-promotion-id` / `data-ga4-promotion-name` to any link or slide
-your theme renders:
+Slides of the image slider (`.carousel-item`) are tracked automatically.
+For any other banner, add `data-ga4-promotion-id` /
+`data-ga4-promotion-name` to the link or block your theme renders:
 
 ```html
 <a href="/summer-sale" data-ga4-promotion-id="summer-sale" data-ga4-promotion-name="Summer Sale">...</a>
@@ -263,6 +280,10 @@ console.
 
 ## Testing
 
+0. **Automated (developers)** - the repository's `local-dev/` folder
+   starts a disposable PrestaShop 9 store in Docker and runs a real
+   browser through every event (`docker compose run --rm e2e`); see the
+   repository README.
 1. **Console check** - open DevTools → Console on any storefront page and
    run:
    ```js
@@ -290,9 +311,10 @@ console.
 
 ## Data mapping notes & assumptions
 
-This module targets PrestaShop 9's Classic theme conventions. A few
-mappings are necessarily "best effort" because PrestaShop doesn't expose a
-single stable contract for them across every theme/module version:
+Both official PrestaShop 9 themes (Hummingbird, the default since 9.0,
+and Classic) are supported. A few mappings are necessarily "best effort"
+because PrestaShop doesn't expose a single stable contract for them
+across every theme/module version:
 
 - **Prices**: `GA4DataLayerFormatter` uses tax-included prices
   (`Product::getPriceStatic($id, true, ...)`), matching what's normally
@@ -303,21 +325,25 @@ single stable contract for them across every theme/module version:
 - **Listing/product/category Smarty variables** (`listing.products`,
   `product`, `category`, `manufacturer`, `supplier`): read defensively
   through several fallback keys (`price_amount`/`price_tax_incl`/`price_wt`/
-  `price`, `id_category_default`/`id_category`, ...) and support both plain
-  arrays and objects, since the exact shape has shifted slightly between
-  PrestaShop minor versions.
-- **Hook timing**: `hookDisplayHeader` reads these Smarty variables safely
-  because PrestaShop evaluates `{hook h='displayHeader'}` while rendering
-  the page template, i.e. *after* `initContent()` has populated them.
-  `hookActionFrontControllerSetMedia`, by contrast, runs during
-  `FrontController::init()` - *before* `initContent()` - so it deliberately
-  reads `id_product` from the request instead of Smarty for the JS
-  `currentProductId` config value.
+  `price`, `id_category_default`/`id_category`, ...). Listing rows are
+  core lazy-array objects (`ArrayAccess`), not plain arrays.
+- **`item_variant`**: attribute names in attribute-group order joined with
+  ` / ` (e.g. `S / White`), identical in every event; `item_name` is
+  always the catalog name without the combination.
+- **Hook timing**: `hookActionFrontControllerSetMedia` runs during
+  `FrontController::init()` - before `initContent()` - so it reads
+  `id_product` from the request instead of Smarty for the JS
+  `currentProductId` config value. Everything that needs template
+  variables runs in `hookDisplayAfterBodyOpeningTag` (see Architecture);
+  your theme's layout must call `{hook h='displayAfterBodyOpeningTag'}`,
+  as both official themes do.
 - **Wishlist / newsletter / back-in-stock / reviews**: DOM selectors target
-  the native `blockwishlist`, `blocknewsletter`, `ps_emailalerts` and
-  `productcomments` modules' typical markup, with fallbacks and an override
-  mechanism (see above) since custom themes frequently restyle these
-  blocks.
+  the native `blockwishlist`, `ps_emailsubscription`, `ps_emailalerts` and
+  `productcomments` markup of both official themes, with an override
+  mechanism (see above) for custom themes.
+- **Combined JS (CCC)**: after updating the module, clear the cache in
+  *Advanced Parameters > Performance*, or the combined bundle keeps
+  serving the previous `front.js`.
 
 If a mapping doesn't match your installed theme/module versions, verify the
 actual markup/response shape with DevTools and adjust `front.js`'s

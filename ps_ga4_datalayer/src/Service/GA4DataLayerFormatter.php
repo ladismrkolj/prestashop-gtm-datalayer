@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 namespace PsGa4DataLayer\Service;
 
+use ArrayAccess;
 use Cart;
 use Category;
-use Combination;
 use Context;
 use Currency;
+use Db;
 use Manufacturer;
 use Order;
 use PrestaShopLogger;
@@ -17,7 +18,7 @@ use Throwable;
 use Tools;
 
 /**
- * Converts native PrestaShop objects (Product, Cart, Order, Combination, ...)
+ * Converts native PrestaShop objects (Product, Cart, Order, ...)
  * into clean, GA4-compliant associative arrays.
  *
  * Design rules enforced everywhere in this class:
@@ -38,6 +39,9 @@ final class GA4DataLayerFormatter
 
     /** @var array<string, array<int, string>> Per-request cache: "idCategory:idLang" => path */
     private array $categoryPathCache = [];
+
+    /** @var array<string, array<int, string>> Per-request cache: "idProduct:idLang" => id_product_attribute => label */
+    private array $variantLabelCache = [];
 
     public function __construct(Context $context)
     {
@@ -147,7 +151,7 @@ final class GA4DataLayerFormatter
      *
      * @param array<string, mixed> $row
      */
-    public function productListItem(array $row, int $index, string $listId, string $listName): array
+    public function productListItem(array|ArrayAccess $row, int $index, string $listId, string $listName): array
     {
         $idProduct = (int) $this->pick($row, ['id_product', 'id'], 0);
         $idLang = (int) $this->context->language->id;
@@ -189,7 +193,7 @@ final class GA4DataLayerFormatter
     {
         $items = [];
         foreach (array_values($rows) as $index => $row) {
-            if (!is_array($row)) {
+            if (!is_array($row) && !$row instanceof ArrayAccess) {
                 continue;
             }
             $items[] = $this->productListItem($row, $index, $listId, $listName);
@@ -245,57 +249,26 @@ final class GA4DataLayerFormatter
     /**
      * Build the full `purchase` ecommerce payload from a validated Order.
      *
+     * A cart shipped by several carriers becomes several orders sharing one
+     * reference. GA4 deduplicates purchases by transaction_id (= reference),
+     * so all of them are reported together as one purchase.
+     *
      * @return array{transaction_id: string, value: float, tax: float, shipping: float, currency: string, coupon: string, items: array<int, array<string, mixed>>}
      */
     public function orderPayload(Order $order): array
     {
         $items = [];
-        $index = 0;
+        $value = 0.0;
+        $taxExcluded = 0.0;
+        $shipping = 0.0;
 
-        try {
-            $rows = $order->getProducts();
-        } catch (Throwable $e) {
-            $this->logWarning('orderPayload:getProducts', $e);
-            $rows = [];
-        }
-
-        if (!is_array($rows)) {
-            $rows = [];
-        }
-
-        foreach ($rows as $row) {
-            if (!is_array($row)) {
-                continue;
+        foreach ($this->ordersSharingReference($order) as $sibling) {
+            foreach ($this->orderRows($sibling) as $row) {
+                $items[] = $this->orderItem($row, (int) $sibling->id_lang, count($items));
             }
-
-            $idProduct = (int) $this->pick($row, ['product_id', 'id_product'], 0);
-            $idProductAttribute = (int) $this->pick($row, ['product_attribute_id', 'id_product_attribute'], 0);
-            $unitPrice = $this->toFloat($this->pick($row, ['unit_price_tax_incl', 'total_price_tax_incl'], 0));
-            $qty = (int) $this->pick($row, ['product_quantity'], 1);
-            $idCategoryDefault = (int) $this->pick($row, ['category_default', 'id_category_default'], 0);
-
-            $item = [
-                'item_id' => (string) ($this->pick($row, ['product_reference'], '') ?: $idProduct),
-                'item_name' => $this->clean((string) $this->pick($row, ['product_name'], '')),
-                'currency' => $this->currencyIsoCode(),
-                'price' => $unitPrice,
-                'quantity' => $qty,
-                'index' => $index++,
-            ];
-
-            if ($idCategoryDefault > 0) {
-                $item = array_merge($item, $this->categoryFields($idCategoryDefault, (int) $order->id_lang));
-            }
-            if ($idProductAttribute > 0) {
-                $item['item_variant'] = $this->variantLabel($idProduct, $idProductAttribute, (int) $order->id_lang);
-            }
-
-            $discount = $this->toFloat($this->pick($row, ['total_refunded_tax_incl'], 0));
-            if ($discount > 0.0) {
-                $item['discount'] = $discount;
-            }
-
-            $items[] = array_filter($item, static fn ($value) => $value !== null && $value !== '');
+            $value += (float) $sibling->total_paid_tax_incl;
+            $taxExcluded += (float) $sibling->total_paid_tax_excl;
+            $shipping += (float) $sibling->total_shipping_tax_incl;
         }
 
         $coupon = '';
@@ -324,9 +297,9 @@ final class GA4DataLayerFormatter
 
         return [
             'transaction_id' => (string) $order->reference,
-            'value' => $this->toFloat($order->total_paid_tax_incl),
-            'tax' => $this->toFloat(((float) $order->total_paid_tax_incl) - ((float) $order->total_paid_tax_excl)),
-            'shipping' => $this->toFloat($order->total_shipping_tax_incl),
+            'value' => $this->toFloat($value),
+            'tax' => $this->toFloat($value - $taxExcluded),
+            'shipping' => $this->toFloat($shipping),
             'currency' => $currencyIso,
             'coupon' => $coupon,
             'items' => $items,
@@ -343,42 +316,16 @@ final class GA4DataLayerFormatter
     {
         $items = [];
         $value = 0.0;
-        $index = 0;
 
-        try {
-            $rows = $order->getProducts();
-        } catch (Throwable $e) {
-            $this->logWarning('refundPayload:getProducts', $e);
-            $rows = [];
-        }
-
-        if (!is_array($rows)) {
-            $rows = [];
-        }
-
-        foreach ($rows as $row) {
-            if (!is_array($row)) {
+        foreach ($this->orderRows($order) as $row) {
+            $qty = (int) ($qtyList[(int) $this->pick($row, ['id_order_detail'], 0)] ?? 0);
+            if ($qty <= 0) {
                 continue;
             }
 
-            $idOrderDetail = (int) $this->pick($row, ['id_order_detail'], 0);
-            if (!isset($qtyList[$idOrderDetail]) || (int) $qtyList[$idOrderDetail] <= 0) {
-                continue;
-            }
-
-            $qty = (int) $qtyList[$idOrderDetail];
-            $unitPrice = $this->toFloat($this->pick($row, ['unit_price_tax_incl', 'total_price_tax_incl'], 0));
-
-            $items[] = [
-                'item_id' => (string) ($this->pick($row, ['product_reference'], '') ?: $this->pick($row, ['product_id'], '')),
-                'item_name' => $this->clean((string) $this->pick($row, ['product_name'], '')),
-                'currency' => $this->currencyIsoCode(),
-                'price' => $unitPrice,
-                'quantity' => $qty,
-                'index' => $index++,
-            ];
-
-            $value += $unitPrice * $qty;
+            $item = array_merge($this->orderItem($row, (int) $order->id_lang, count($items)), ['quantity' => $qty]);
+            $items[] = $item;
+            $value += $item['price'] * $qty;
         }
 
         return [
@@ -390,7 +337,79 @@ final class GA4DataLayerFormatter
     }
 
     /**
-     * Human-readable "Color - Red, Size - L" style label for a combination.
+     * GA4 item for an order_detail row. item_name is the catalog name
+     * (order rows store "Name (Size: S - Color: White)"), so purchases join
+     * the same item as view_item / add_to_cart; the combination goes to
+     * item_variant.
+     *
+     * @param array<string, mixed> $row
+     */
+    private function orderItem(array $row, int $idLang, int $index): array
+    {
+        $idProduct = (int) $this->pick($row, ['product_id', 'id_product'], 0);
+        $idProductAttribute = (int) $this->pick($row, ['product_attribute_id', 'id_product_attribute'], 0);
+
+        $name = '';
+        try {
+            $name = (string) Product::getProductName($idProduct, null, $idLang);
+        } catch (Throwable $e) {
+            $this->logWarning('orderItem:name', $e);
+        }
+
+        $item = [
+            'item_id' => (string) ($this->pick($row, ['product_reference'], '') ?: $idProduct),
+            'item_name' => $this->clean($name !== '' ? $name : (string) $this->pick($row, ['product_name'], '')),
+            'currency' => $this->currencyIsoCode(),
+            'price' => $this->toFloat($this->pick($row, ['unit_price_tax_incl', 'total_price_tax_incl'], 0)),
+            'quantity' => (int) $this->pick($row, ['product_quantity'], 1),
+            'index' => $index,
+        ];
+
+        $idCategoryDefault = (int) $this->pick($row, ['category_default', 'id_category_default'], 0);
+        if ($idCategoryDefault > 0) {
+            $item = array_merge($item, $this->categoryFields($idCategoryDefault, $idLang));
+        }
+        if ($idProductAttribute > 0) {
+            $item['item_variant'] = $this->variantLabel($idProduct, $idProductAttribute, $idLang);
+        }
+
+        return array_filter($item, static fn ($value) => $value !== null && $value !== '');
+    }
+
+    /** @return array<int, Order> */
+    private function ordersSharingReference(Order $order): array
+    {
+        $orders = [];
+        try {
+            foreach (Order::getByReference((string) $order->reference) as $sibling) {
+                if ($sibling instanceof Order && (int) $sibling->id > 0) {
+                    $orders[] = $sibling;
+                }
+            }
+        } catch (Throwable $e) {
+            $this->logWarning('ordersSharingReference', $e);
+        }
+
+        return $orders !== [] ? $orders : [$order];
+    }
+
+    /** @return array<int, array<string, mixed>> */
+    private function orderRows(Order $order): array
+    {
+        try {
+            $rows = $order->getProducts();
+        } catch (Throwable $e) {
+            $this->logWarning('orderRows', $e);
+            $rows = [];
+        }
+
+        return array_values(array_filter(is_array($rows) ? $rows : [], 'is_array'));
+    }
+
+    /**
+     * item_variant for a combination: attribute names in attribute-group
+     * order joined with " / " (e.g. "S / White"). front.js builds the same
+     * label from cart rows, so every event reports identical variants.
      */
     public function variantLabel(int $idProduct, int $idProductAttribute, ?int $idLang = null): string
     {
@@ -398,30 +417,56 @@ final class GA4DataLayerFormatter
             return '';
         }
 
-        $idLang = $idLang ?? (int) $this->context->language->id;
+        return $this->variantLabels($idProduct, $idLang ?? (int) $this->context->language->id)[$idProductAttribute] ?? '';
+    }
 
-        try {
-            // NOTE: check `->id`, not Tools::isEmptyOrNull() - that helper
-            // does NOT exist in PrestaShop 9 and calling it is a fatal
-            // Error. An ObjectModel constructed with an unknown id simply
-            // comes back with a null id, which is what's checked here.
-            $combination = new Combination($idProductAttribute);
-            if ((int) $combination->id > 0 && (int) $combination->id_product === $idProduct) {
-                $pairs = [];
-                foreach ((array) $combination->getAttributesName($idLang) as $attribute) {
-                    if (is_array($attribute) && !empty($attribute['name'])) {
-                        $pairs[] = (string) $attribute['name'];
-                    }
-                }
-                if ($pairs !== []) {
-                    return implode(' / ', $pairs);
-                }
-            }
-        } catch (Throwable $e) {
-            $this->logWarning('variantLabel', $e);
+    /**
+     * Every combination of the product page's product with its label and
+     * price, so view_item_variants needs no AJAX.
+     *
+     * @return array<int, array{item_variant: string, price: float}>
+     */
+    public function variantsForProduct(int $idProduct): array
+    {
+        $variants = [];
+        foreach ($this->variantLabels($idProduct, (int) $this->context->language->id) as $idProductAttribute => $label) {
+            $variants[$idProductAttribute] = [
+                'item_variant' => $label,
+                'price' => $this->toFloat($this->priceForProduct($idProduct, $idProductAttribute)),
+            ];
         }
 
-        return '';
+        return $variants;
+    }
+
+    /** @return array<int, string> id_product_attribute => label */
+    private function variantLabels(int $idProduct, int $idLang): array
+    {
+        $cacheKey = $idProduct . ':' . $idLang;
+        if (isset($this->variantLabelCache[$cacheKey])) {
+            return $this->variantLabelCache[$cacheKey];
+        }
+
+        $names = [];
+        try {
+            $rows = Db::getInstance()->executeS(
+                'SELECT pa.`id_product_attribute`, al.`name`
+                FROM `' . _DB_PREFIX_ . 'product_attribute` pa
+                INNER JOIN `' . _DB_PREFIX_ . 'product_attribute_combination` pac ON pac.`id_product_attribute` = pa.`id_product_attribute`
+                INNER JOIN `' . _DB_PREFIX_ . 'attribute` a ON a.`id_attribute` = pac.`id_attribute`
+                INNER JOIN `' . _DB_PREFIX_ . 'attribute_group` ag ON ag.`id_attribute_group` = a.`id_attribute_group`
+                INNER JOIN `' . _DB_PREFIX_ . 'attribute_lang` al ON al.`id_attribute` = a.`id_attribute` AND al.`id_lang` = ' . (int) $idLang . '
+                WHERE pa.`id_product` = ' . (int) $idProduct . '
+                ORDER BY pa.`id_product_attribute`, ag.`position`, a.`position`'
+            );
+            foreach (is_array($rows) ? $rows : [] as $row) {
+                $names[(int) $row['id_product_attribute']][] = $this->clean((string) $row['name']);
+            }
+        } catch (Throwable $e) {
+            $this->logWarning('variantLabels', $e);
+        }
+
+        return $this->variantLabelCache[$cacheKey] = array_map(static fn (array $parts): string => implode(' / ', $parts), $names);
     }
 
     /**
@@ -551,26 +596,26 @@ final class GA4DataLayerFormatter
     }
 
     /**
-     * $row is deliberately untyped (`mixed`, not `array`): core methods
-     * like `Cart::getProducts()`/`Order::getProducts()` are documented to
-     * return arrays of arrays, but a theme/module hook can reshape a row
-     * (or a row can be missing/false) in ways this class has no control
-     * over. Under `strict_types=1`, handing anything but an array to an
-     * `array`-typed parameter throws an uncaught TypeError - which, given
-     * PrestaShop's output buffering, blanks the entire page. Accepting
-     * `mixed` here and failing soft is what actually prevents that.
+     * $row is deliberately untyped (`mixed`): listing rows are core
+     * ProductListingLazyArray objects (ArrayAccess, not arrays), and a
+     * theme/module hook can reshape a row (or a row can be missing/false).
+     * Under `strict_types=1`, a wrong type on a typed parameter throws an
+     * uncaught TypeError - which, given PrestaShop's output buffering,
+     * blanks the entire page. Accepting `mixed` and failing soft prevents
+     * that.
      *
      * @param array<int, string> $keys
      */
     private function pick(mixed $row, array $keys, mixed $default = null): mixed
     {
-        if (!is_array($row)) {
+        if (!is_array($row) && !$row instanceof ArrayAccess) {
             return $default;
         }
 
         foreach ($keys as $key) {
-            if (array_key_exists($key, $row) && $row[$key] !== null && $row[$key] !== '') {
-                return $row[$key];
+            $value = $row[$key] ?? null;
+            if ($value !== null && $value !== '') {
+                return $value;
             }
         }
 
